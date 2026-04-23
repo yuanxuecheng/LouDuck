@@ -1,0 +1,1993 @@
+"""
+ITU-R BS.1770-5 响度测量仪 v3.1 (整合修复版)
+修复：
+- 测量算法（process_audio 变量定义、最大值追踪）
+- 智能声道匹配（支持点号分隔的声道标识）
+- 术语统一（节目响度、最大短时/瞬时响度）
+- ADM解析兼容性（支持旧版adm_parser）
+"""
+
+import sys
+import soundfile as sf
+import numpy as np
+import time
+import re
+from pathlib import Path
+from dataclasses import dataclass
+from typing import Dict, Optional, List, Tuple
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QLabel, QFileDialog, QProgressBar, QTableWidget,
+    QTableWidgetItem, QGroupBox, QMessageBox, QComboBox, QDialog,
+    QListWidget, QAbstractItemView, QDialogButtonBox, QLineEdit,
+    QFrame, QCheckBox, QSpinBox, QTextEdit
+)
+from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QFont, QColor
+
+from itu1770_meter import ITU1770Meter, ChannelConfig
+from report_exporter import LoudnessResults, ReportExporter
+from adm_parser import BW64Parser, is_adm_file
+
+
+@dataclass
+class LoudnessStandard:
+    """响度标准配置"""
+    name: str
+    integrated_target: float
+    integrated_tolerance: float
+    true_peak_limit: float
+    
+    def check_integrated(self, value: float) -> bool:
+        """检查节目响度是否符合标准"""
+        return abs(value - self.integrated_target) <= self.integrated_tolerance
+    
+    def check_true_peak(self, value: float) -> bool:
+        """检查真峰值是否符合标准"""
+        return value <= self.true_peak_limit
+
+
+# 响度标准定义
+LOUDNESS_STANDARDS = {
+    "EBU R128 (欧洲广播)": LoudnessStandard(
+        name="EBU R128", integrated_target=-23.0, integrated_tolerance=1.0, true_peak_limit=-1.0
+    ),
+    "ATSC A/85 (美国电视)": LoudnessStandard(
+        name="ATSC A/85", integrated_target=-24.0, integrated_tolerance=1.0, true_peak_limit=-1.0
+    ),
+    "GY/T 282-2014 (中国广电-电视)": LoudnessStandard(
+        name="GY/T 282-2014", integrated_target=-24.0, integrated_tolerance=2.0, true_peak_limit=-2.0
+    ),
+    "GY/T 377-2023 (中国广电-网络/嘈杂环境)": LoudnessStandard(
+        name="GY/T 377-2023", integrated_target=-15.0, integrated_tolerance=2.0, true_peak_limit=-2.0
+    ),
+}
+
+
+# 声道配置模板 - 改进版，支持多种命名变体
+CHANNEL_TEMPLATES = {
+    "Stereo (2.0)": {
+        "channels": ["L", "R"],
+        "patterns": [
+            r"(^|[^a-zA-Z0-9.])(L|Left|FL|Front[_-]?Left)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z0-9.])(R|Right|FR|Front[_-]?Right)([^a-zA-Z0-9]|$)"
+        ]
+    },
+    "5.1 (6ch)": {
+        "channels": ["L", "R", "C", "LFE", "Ls", "Rs"],
+        "patterns": [
+            r"(^|[^a-zA-Z0-9.])(L|Left|FL|Front[_-]?Left)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z0-9.])(R|Right|FR|Front[_-]?Right)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z0-9.])(C|Center|Centre|FC|Front[_-]?Center)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z0-9.])(LFE|Lfe|Sub|Subwoofer|SW)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z0-9.])(Ls|LS|Lss|Lsr|Left[_-]?Surround|Left[_-]?Rear|Surround[_-]?Left|SL|BL|Back[_-]?Left|Lrs)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z0-9.])(Rs|RS|Rss|Rsr|Right[_-]?Surround|Right[_-]?Rear|Surround[_-]?Right|SR|BR|Back[_-]?Right|Rrs)([^a-zA-Z0-9]|$)"
+        ]
+    },
+    "5.1.4 (10ch)": {
+        "channels": ["L", "R", "C", "LFE", "Ls", "Rs", "Ltf", "Rtf", "Ltr", "Rtr"],
+        "patterns": [
+            r"(^|[^a-zA-Z0-9.])(L|Left|FL|Front[_-]?Left)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z0-9.])(R|Right|FR|Front[_-]?Right)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z0-9.])(C|Center|Centre|FC|Front[_-]?Center)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z0-9.])(LFE|Lfe|Sub|Subwoofer|SW)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z0-9.])(Ls|LS|Lss|Lsr|Left[_-]?Surround|Left[_-]?Rear|Surround[_-]?Left|SL|BL|Back[_-]?Left|Lrs)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z0-9.])(Rs|RS|Rss|Rsr|Right[_-]?Surround|Right[_-]?Rear|Surround[_-]?Right|SR|BR|Back[_-]?Right|Rrs)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z0-9.])(Ltf|LtF|Left[_-]?Top[_-]?Front|Top[_-]?Front[_-]?Left|TFL|Lft|Left[_-]?Front[_-]?Top)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z0-9.])(Rtf|RtF|Right[_-]?Top[_-]?Front|Top[_-]?Front[_-]?Right|TFR|Rft|Right[_-]?Front[_-]?Top)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z0-9.])(Ltr|LtR|Left[_-]?Top[_-]?Rear|Top[_-]?Rear[_-]?Left|TRL|Lrt|Left[_-]?Rear[_-]?Top|Ltb|Left[_-]?Top[_-]?Back)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z0-9.])(Rtr|RtR|Right[_-]?Top[_-]?Rear|Top[_-]?Rear[_-]?Right|TRR|Rrt|Right[_-]?Rear[_-]?Top|Rtb|Right[_-]?Top[_-]?Back)([^a-zA-Z0-9]|$)"
+        ]
+    },
+    "7.1.4 (12ch)": {
+        "channels": ["L", "R", "C", "LFE", "Lss", "Rss", "Lrs", "Rrs", "Ltf", "Rtf", "Ltb", "Rtb"],
+        "patterns": [
+            r"(^|[^a-zA-Z0-9.])(L|Left|FL|Front[_-]?Left)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z0-9.])(R|Right|FR|Front[_-]?Right)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z0-9.])(C|Center|Centre|FC|Front[_-]?Center)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z0-9.])(LFE|Lfe|Sub|Subwoofer|SW)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z0-9.])(Lss|LSs|Left[_-]?Side|Side[_-]?Left|SL|Left[_-]?Side[_-]?Surround)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z0-9.])(Rss|RSs|Right[_-]?Side|Side[_-]?Right|SR|Right[_-]?Side[_-]?Surround)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z0-9.])(Lrs|LRs|Left[_-]?Rear|Rear[_-]?Left|LR|Back[_-]?Left|BL|Left[_-]?Back|Lsr)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z0-9.])(Rrs|RRs|Right[_-]?Rear|Rear[_-]?Right|RR|Back[_-]?Right|BR|Right[_-]?Back|Rsr)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z0-9.])(Ltf|LtF|Left[_-]?Top[_-]?Front|Top[_-]?Front[_-]?Left|TFL|Lft)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z0-9.])(Rtf|RtF|Right[_-]?Top[_-]?Front|Top[_-]?Front[_-]?Right|TFR|Rft)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z0-9.])(Ltb|LtB|Left[_-]?Top[_-]?Back|Top[_-]?Back[_-]?Left|TBL|Lbt)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z0-9.])(Rtb|RtB|Right[_-]?Top[_-]?Back|Top[_-]?Back[_-]?Right|TBR|Rbt)([^a-zA-Z0-9]|$)"
+        ]
+    },
+}
+
+
+class SmartMultiMonoDialog(QDialog):
+    """智能声道匹配对话框 - 改进版，支持点号分隔的声道标识"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("智能声道匹配")
+        self.setMinimumSize(800, 550)
+        
+        self.selected_files: List[Tuple[str, str]] = []
+        self.current_template = None
+        
+        self._setup_ui()
+    
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        
+        # 模板选择
+        template_layout = QHBoxLayout()
+        template_layout.addWidget(QLabel("声道模板:"))
+        self.template_combo = QComboBox()
+        self.template_combo.addItems(list(CHANNEL_TEMPLATES.keys()) + ["自定义"])
+        self.template_combo.currentTextChanged.connect(self.on_template_changed)
+        template_layout.addWidget(self.template_combo)
+        
+        self.expected_count_label = QLabel("")
+        template_layout.addWidget(self.expected_count_label)
+        template_layout.addStretch()
+        layout.addLayout(template_layout)
+        
+        # 显示预期声道顺序
+        order_layout = QHBoxLayout()
+        order_layout.addWidget(QLabel("预期声道顺序:"))
+        self.order_display = QLabel("-")
+        self.order_display.setStyleSheet("color: #667eea; font-weight: bold;")
+        order_layout.addWidget(self.order_display)
+        order_layout.addStretch()
+        layout.addLayout(order_layout)
+        
+        # 三栏布局
+        main_layout = QHBoxLayout()
+        
+        # 左：预期声道列表
+        left_layout = QVBoxLayout()
+        left_layout.addWidget(QLabel("预期声道:"))
+        self.expected_list = QListWidget()
+        self.expected_list.setMaximumWidth(100)
+        left_layout.addWidget(self.expected_list)
+        
+        # 中：匹配结果
+        center_layout = QVBoxLayout()
+        center_layout.addWidget(QLabel("匹配结果 (声道 ← 文件):"))
+        self.match_list = QListWidget()
+        self.match_list.setMinimumWidth(400)
+        center_layout.addWidget(self.match_list)
+        
+        # 右：操作按钮
+        right_layout = QVBoxLayout()
+        right_layout.addWidget(QLabel("操作:"))
+        right_layout.addSpacing(10)
+        
+        self.auto_match_btn = QPushButton("🎯 自动匹配")
+        self.auto_match_btn.setToolTip("根据文件名后缀自动识别声道")
+        self.auto_match_btn.clicked.connect(self.auto_match)
+        right_layout.addWidget(self.auto_match_btn)
+        
+        self.add_btn = QPushButton("➕ 添加文件")
+        self.add_btn.clicked.connect(self.add_files)
+        right_layout.addWidget(self.add_btn)
+        
+        self.clear_btn = QPushButton("🗑 清空")
+        self.clear_btn.clicked.connect(self.clear_all)
+        right_layout.addWidget(self.clear_btn)
+        
+        right_layout.addStretch()
+        
+        main_layout.addLayout(left_layout, 1)
+        main_layout.addLayout(center_layout, 4)
+        main_layout.addLayout(right_layout, 1)
+        layout.addLayout(main_layout)
+        
+        # 显示选中文件路径
+        layout.addWidget(QLabel("文件路径:"))
+        self.path_display = QLineEdit()
+        self.path_display.setReadOnly(True)
+        self.path_display.setPlaceholderText("未选择文件")
+        layout.addWidget(self.path_display)
+        
+        # 状态信息
+        self.status_label = QLabel("请选择模板并添加文件")
+        self.status_label.setStyleSheet("color: #888;")
+        layout.addWidget(self.status_label)
+        
+        # 按钮
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.on_ok)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        
+        self.update_template_display()
+    
+    def on_template_changed(self, template_name):
+        self.current_template = template_name if template_name in CHANNEL_TEMPLATES else None
+        self.update_template_display()
+    
+    def update_template_display(self):
+        self.expected_list.clear()
+        
+        if self.current_template and self.current_template in CHANNEL_TEMPLATES:
+            config = CHANNEL_TEMPLATES[self.current_template]
+            channels = config["channels"]
+            self.order_display.setText(" → ".join(channels))
+            self.expected_count_label.setText(f"({len(channels)} 声道)")
+            
+            for ch in channels:
+                self.expected_list.addItem(ch)
+        else:
+            self.order_display.setText("自定义 (无固定顺序)")
+            self.expected_count_label.setText("")
+    
+    def add_files(self):
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "选择单声道WAV文件", "", "WAV文件 (*.wav)"
+        )
+        if not files:
+            return
+        
+        for path in files:
+            try:
+                info = sf.info(path)
+                if info.channels != 1:
+                    QMessageBox.warning(self, "跳过", f"{Path(path).name}: 不是单声道({info.channels}ch)")
+                    continue
+                
+                self.selected_files.append((path, "?"))
+                
+            except Exception as e:
+                QMessageBox.warning(self, "错误", f"{Path(path).name}: {e}")
+        
+        self.update_match_display()
+        self.update_path_display()
+        
+        if self.current_template:
+            self.auto_match()
+    
+    def _read_wav_channel_label(self, filepath: str) -> str:
+        """从 WAV/BWF 文件读取 iXML 声道标签"""
+        try:
+            import soundfile as sf
+            import xml.etree.ElementTree as ET
+
+            with sf.SoundFile(filepath) as f:
+                extra = f.extra_info
+
+            if not extra or "<BWFXML>" not in extra:
+                return ""
+
+            root = ET.fromstring(extra)
+
+            # 查找 TRACK_LIST 中的声道名称
+            for track_list in root.findall(".//TRACK_LIST"):
+                for track in track_list.findall("TRACK"):
+                    name = track.findtext("NAME", "").strip()
+                    if name:
+                        return name
+
+            return ""
+        except Exception:
+            return ""
+
+    def _extract_channel_id(self, filename: str) -> str:
+        """从文件名提取声道标识，支持常见变体"""
+        dot_parts = filename.split(".")
+        if len(dot_parts) > 1:
+            suffix = dot_parts[-1].upper()
+            ch_map = {
+                'L': 'L', 'LEFT': 'L', 'FL': 'L',
+                'R': 'R', 'RIGHT': 'R', 'FR': 'R',
+                'C': 'C', 'CENTER': 'C', 'CENTRE': 'C', 'FC': 'C',
+                'LFE': 'LFE', 'SUB': 'LFE', 'SW': 'LFE',
+                'LS': 'Ls', 'LSS': 'Lss', 'SL': 'Ls',
+                'RS': 'Rs', 'RSS': 'Rss', 'SR': 'Rs',
+                'LRS': 'Lrs', 'LR': 'Lrs', 'BL': 'Lrs',
+                'LSR': 'Lrs',
+                'RRS': 'Rrs', 'RR': 'Rrs', 'BR': 'Rrs',
+                'RSR': 'Rrs',
+                'LTF': 'Ltf', 'RTF': 'Rtf',
+                'LTR': 'Ltr', 'RTR': 'Rtr',
+                'LTB': 'Ltb', 'RTB': 'Rtb',
+            }
+            if suffix in ch_map:
+                return ch_map[suffix]
+        return ""
+
+    def auto_match(self):
+        """根据文件名后缀智能匹配 - 改进版，支持点号分隔的声道标识"""
+        if not self.selected_files:
+            return
+        
+        if not self.current_template or self.current_template not in CHANNEL_TEMPLATES:
+            # 自定义模式：优先 iXML，回退到文件名识别
+            for i, (path, _) in enumerate(self.selected_files):
+                if self.selected_files[i][1] == "?":
+                    # 1. 尝试读取 iXML 元数据
+                    ixml_label = self._read_wav_channel_label(path)
+                    if ixml_label:
+                        self.selected_files[i] = (path, ixml_label)
+                        continue
+                    # 2. 回退到文件名识别
+                    name = Path(path).stem
+                    ch_id = self._extract_channel_id(name)
+                    if ch_id:
+                        self.selected_files[i] = (path, ch_id)
+                    else:
+                        self.selected_files[i] = (path, f"Ch{i+1}")
+            self.update_match_display()
+            return
+        
+        config = CHANNEL_TEMPLATES[self.current_template]
+        channels = config["channels"]
+        patterns = config["patterns"]
+        
+        # 重置所有匹配
+        for i, (path, _) in enumerate(self.selected_files):
+            self.selected_files[i] = (path, "?")
+        
+        matched_indices = set()
+        
+        for ch_idx, (ch_name, pattern) in enumerate(zip(channels, patterns)):
+            best_match = -1
+            best_score = -1
+            
+            for file_idx, (path, current_ch) in enumerate(self.selected_files):
+                if file_idx in matched_indices:
+                    continue
+                
+                filename = Path(path).stem
+                
+                # 提取点号后的部分（如 "2005.C" -> "C"）
+                dot_parts = filename.split('.')
+                after_dot = dot_parts[-1] if len(dot_parts) > 1 else ""
+                
+                score = 0
+                match_pos = -1
+                
+                # 0. 优先 iXML 元数据（最高优先级，10000分）
+                ixml_label = self._read_wav_channel_label(path)
+                if ixml_label and ixml_label.upper() == ch_name.upper():
+                    score = 10000
+                    match_pos = 0
+                # 1. 使用 _extract_channel_id 映射（高优先级，5000分）
+                else:
+                    extracted_id = self._extract_channel_id(filename)
+                    if extracted_id and extracted_id.upper() == ch_name.upper():
+                        score = 5000
+                        match_pos = filename.rfind('.' + after_dot)
+                    else:
+                        score = 0
+
+                # 2. 点号后完全匹配（2000分）
+                if score == 0 and after_dot.upper() == ch_name.upper():
+                    score = 2000
+                    match_pos = filename.rfind('.' + after_dot)
+                # 3. 点号后正则匹配（1500分）
+                elif score == 0 and re.search(pattern, after_dot, re.IGNORECASE):
+                    score = 1500
+                    match_pos = filename.rfind('.' + after_dot)
+                # 4. 整个文件名完全匹配（1000分）
+                elif score == 0 and filename.upper() == ch_name.upper():
+                    score = 1000
+                    match_pos = 0
+                # 5. 整个文件名正则匹配（500分+位置）
+                elif score == 0 and re.search(pattern, filename, re.IGNORECASE):
+                    match = re.search(pattern, filename, re.IGNORECASE)
+                    score = 500
+                    match_pos = match.start()
+                    score += match_pos
+                # 6. 模糊匹配（100分+位置）
+                elif score == 0 and ch_name.upper() in filename.upper():
+                    score = 100
+                    match_pos = filename.upper().find(ch_name.upper())
+                    score += match_pos
+                
+                if score > best_score:
+                    best_score = score
+                    best_match = file_idx
+            
+            if best_match >= 0 and best_score > 0:
+                matched_indices.add(best_match)
+                path = self.selected_files[best_match][0]
+                self.selected_files[best_match] = (path, channels[ch_idx])
+        
+        self.update_match_display()
+    
+    def update_match_display(self):
+        """更新匹配显示"""
+        self.match_list.clear()
+        
+        for path, ch_name in self.selected_files:
+            filename = Path(path).name
+            
+            if ch_name == "?":
+                display = f"[未匹配]  ←  {filename}"
+                self.match_list.addItem(display)
+                self.match_list.item(self.match_list.count() - 1).setForeground(QColor("#e74c3c"))
+            else:
+                # 检测是否来自 iXML
+                ixml_label = self._read_wav_channel_label(path)
+                source = "📋iXML" if ixml_label == ch_name else "🔤文件名"
+                display = f"[{ch_name}] {source} ←  {filename}"
+                self.match_list.addItem(display)
+                self.match_list.item(self.match_list.count() - 1).setForeground(QColor("#27ae60"))
+        
+        # 更新状态
+        total = len(self.selected_files)
+        matched = sum(1 for _, ch in self.selected_files if ch != "?")
+        
+        if self.current_template:
+            expected = len(CHANNEL_TEMPLATES[self.current_template]["channels"])
+            if matched == expected and total == expected:
+                self.status_label.setText(f"✓ 完美匹配: {matched}/{expected} 声道")
+                self.status_label.setStyleSheet("color: #27ae60;")
+            else:
+                self.status_label.setText(f"已匹配: {matched}/{total} | 预期: {expected} 声道")
+                self.status_label.setStyleSheet("color: #f39c12;" if matched < expected else "color: #27ae60;")
+        else:
+            self.status_label.setText(f"文件数: {total} | 自定义模式")
+            self.status_label.setStyleSheet("color: #888;")
+    
+    def update_path_display(self):
+        """显示选中文件路径"""
+        if self.selected_files:
+            first_dir = Path(self.selected_files[0][0]).parent
+            self.path_display.setText(str(first_dir))
+        else:
+            self.path_display.setText("")
+    
+    def clear_all(self):
+        self.selected_files = []
+        self.match_list.clear()
+        self.path_display.setText("")
+        self.status_label.setText("请选择模板并添加文件")
+        self.status_label.setStyleSheet("color: #888;")
+    
+    def on_ok(self):
+        if not self.selected_files:
+            QMessageBox.warning(self, "警告", "请至少添加一个文件")
+            return
+        
+        for path, ch in self.selected_files:
+            if not Path(path).exists():
+                QMessageBox.critical(self, "错误", f"文件不存在:\n{path}")
+                return
+        
+        unmatched = [Path(p).name for p, c in self.selected_files if c == "?"]
+        if unmatched:
+            reply = QMessageBox.question(
+                self, "未匹配声道", 
+                f"以下文件未匹配:\n" + "\n".join(unmatched[:5]) + f"\n\n是否继续？",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply == QMessageBox.No:
+                return
+        
+        self.accept()
+    
+    def get_files(self) -> List[Tuple[str, str]]:
+        """获取按声道顺序排序后的文件列表"""
+        sorted_files = sorted(self.selected_files, key=lambda x: x[1])
+        return [(p, c) for p, c in sorted_files if c != "?"]
+
+
+class ExportOptionsDialog(QDialog):
+    def __init__(self, has_detailed, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("导出选项")
+        self.setMinimumSize(400, 300)
+        
+        self.has_detailed = has_detailed
+        
+        layout = QVBoxLayout(self)
+        
+        layout.addWidget(QLabel("导出格式:"))
+        self.format_combo = QComboBox()
+        self.format_combo.addItems(["TXT (文本报告)", "JSON (结构化数据)", "CSV (表格数据)"])
+        layout.addWidget(self.format_combo)
+        
+        layout.addSpacing(20)
+        layout.addWidget(QLabel("详细程度:"))
+        
+        self.summary_check = QCheckBox("总体概况 (节目响度/最大短时/最大瞬时/真峰值/LRA)")
+        self.summary_check.setChecked(True)
+        layout.addWidget(self.summary_check)
+        
+        layout.addWidget(QLabel("Excel导出将包含:\n• 整体测量结果\n• 每秒短时响度 (3秒滑动窗口)\n• 每秒最大真峰值\n• 超标数值以红色标注"))
+        
+        layout.addStretch()
+        
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+    
+    def on_detailed_changed(self, state):
+        self.interval_spin.setEnabled(state == Qt.Checked)
+    
+    def get_options(self):
+        return {
+            'format': ['txt', 'json', 'csv'][self.format_combo.currentIndex()],
+            'include_summary': self.summary_check.isChecked(),
+            'include_detailed': True,
+            'interval_ms': 1000
+        }
+
+
+class DetailedMeasurementWorker(QThread):
+    progress_detail = Signal(int, float, float, float, str)
+    finished_signal = Signal(dict)
+    error = Signal(str)
+    sub_step = Signal(str, int)
+    
+    def __init__(self, input_mode, input_data, config_name, standard):
+        super().__init__()
+        self.input_mode = input_mode
+        self.input_data = input_data
+        self.config_name = config_name
+        self.standard = standard
+        self.process_start_time = None  # 处理开始时间
+        self.audio_duration = 0.0  # 音频总时长（秒）
+    
+    def run(self):
+        try:
+            start_time = time.time()
+            audio = None
+            sr = None
+            filename = "测量文件"
+            
+            # === 阶段1: 准备 (0-15%) ===
+            self.sub_step.emit("准备音频...", 0)
+            
+            if self.input_mode == 'file':
+                file_path = self.input_data
+                info = sf.info(file_path)
+                sr = info.samplerate
+                filename = Path(file_path).name
+                file_size = Path(file_path).stat().st_size
+                
+                # 小文件(<50MB)直接加载
+                if file_size < 50 * 1024 * 1024:
+                    self.sub_step.emit(f"加载: {filename[:30]}", 5)
+                    audio, sr = sf.read(file_path, dtype='float32')
+                    self.sub_step.emit("加载完成", 15)
+                else:
+                    # 大文件分块加载，显示进度 5-15%
+                    audio, sr = self._load_large_file(file_path, file_size)
+                    
+            elif self.input_mode == 'adm':
+                parser = self.input_data
+                self.sub_step.emit("读取ADM...", 5)
+                audio, sr = parser.read_audio()
+                self.sub_step.emit("ADM加载完成", 15)
+                filename = "ADM文件"
+                
+            elif self.input_mode == 'mono_list':
+                mono_files = self.input_data
+                total_files = len(mono_files)
+                
+                self.sub_step.emit("分析文件...", 2)
+                max_samples = 0
+                sr = None
+                
+                for i, (path, name) in enumerate(mono_files):
+                    info = sf.info(path)
+                    max_samples = max(max_samples, info.frames)
+                    if sr is None:
+                        sr = info.samplerate
+                    progress = 2 + (i + 1) / total_files * 5
+                    self.sub_step.emit(f"分析: {name}", int(progress))
+                
+                num_channels = len(mono_files)
+                audio = np.zeros((max_samples, num_channels), dtype=np.float32)
+                
+                for i, (path, name) in enumerate(mono_files):
+                    progress = 7 + i / num_channels * 8
+                    self.sub_step.emit(f"加载: {name}", int(progress))
+                    data, _ = sf.read(path, dtype='float32')
+                    if data.ndim > 1:
+                        data = data[:, 0]
+                    copy_len = min(len(data), max_samples)
+                    audio[:copy_len, i] = data[:copy_len]
+                
+                self.sub_step.emit("多单声道加载完成", 15)
+            
+            if audio is None:
+                raise ValueError("音频加载失败")
+            
+            if audio.ndim == 1:
+                audio = audio.reshape(-1, 1)
+            
+            actual_duration = len(audio) / sr
+            num_channels = audio.shape[1]
+            self.audio_duration = actual_duration  # 保存音频时长用于倍速计算
+            
+            # === 阶段2: 初始化测量器 (15-20%) ===
+            self.sub_step.emit(f"初始化: {num_channels}ch, {actual_duration:.1f}s", 15)
+            
+            if self.input_mode == 'adm':
+                adm_config = self.input_data.adm.to_itu1770_config()
+                meter = ITU1770Meter(adm_config, sr)
+            else:
+                if self.config_name == "自动检测":
+                    config = ITU1770Meter.auto_config(num_channels)
+                else:
+                    config_name = self.config_name if self.config_name in ITU1770Meter.CONFIGS else ITU1770Meter.auto_config(num_channels)
+                    config = ITU1770Meter.CONFIGS.get(config_name, ITU1770Meter.auto_config(num_channels))
+                meter = ITU1770Meter(config, sr)
+            
+            self.sub_step.emit("开始测量...", 20)
+            self.process_start_time = time.time()  # 记录处理开始时间
+            
+            # === 阶段3: 响度测量 (20-90%) ===
+            # 使用回调函数获取进度
+            def on_process_progress(current_block, total_blocks):
+                # 20-90% 区间映射
+                progress_pct = 20 + (current_block / total_blocks) * 70
+                
+                # 计算实时处理倍速
+                speed_str = ""
+                if self.process_start_time and self.audio_duration > 0:
+                    elapsed = time.time() - self.process_start_time
+                    processed_time = (current_block / total_blocks) * self.audio_duration
+                    if elapsed > 0 and processed_time > 0:
+                        speed_ratio = processed_time / elapsed
+                        speed_str = f" | ⚡{speed_ratio:.1f}x实时"
+                
+                self.sub_step.emit(f"测量中... {current_block}/{total_blocks}块{speed_str}", int(progress_pct))
+            
+            result = meter.process_audio(audio, sr, progress_callback=on_process_progress)
+            
+            # === 阶段4: 最终计算 (90-95%) ===
+            self.sub_step.emit("计算最终指标...", 90)
+            
+            # 获取结果（使用最大值）
+            integrated = result['integrated']
+            short_term = result['max_short_term'] if result['max_short_term'] != -np.inf else result['short_term']
+            momentary = result['max_momentary'] if result['max_momentary'] != -np.inf else result['momentary']
+            lra = result['lra']
+            true_peak = result['true_peak']
+            
+            # 收集详细时序数据用于导出
+            detailed_data = self._build_detailed_data(result, actual_duration)
+            
+            # === 阶段5: 完成 (95-100%) ===
+            self.sub_step.emit("整理结果...", 95)
+            
+            final_results = {
+                'integrated': integrated,
+                'short_term': short_term,
+                'momentary': momentary,
+                'true_peak': true_peak,
+                'lra': lra,
+                'max_true_peak': true_peak,
+                'duration': actual_duration,
+                'filename': filename,
+                'sample_rate': sr,
+                'channels': num_channels,
+                'processing_time': time.time() - start_time,
+                'detailed_data': detailed_data
+            }
+            
+            self.sub_step.emit("完成", 100)
+            self.finished_signal.emit(final_results)
+            
+        except Exception as e:
+            import traceback
+            self.error.emit(f"{str(e)}\n{traceback.format_exc()}")
+    
+    def _load_large_file(self, file_path, file_size):
+        """加载大文件并显示进度 (5-15%)"""
+        info = sf.info(file_path)
+        sr = info.samplerate
+        total_samples = info.frames
+        num_channels = info.channels
+        audio = np.zeros((total_samples, num_channels), dtype='float32')
+        
+        with sf.SoundFile(file_path, 'r') as f:
+            idx = 0
+            loaded_size = 0
+            chunk_samples = 1024 * 1024  # 1MB chunks
+            
+            while loaded_size < file_size:
+                chunk = f.read(chunk_samples, dtype='float32')
+                if len(chunk) == 0:
+                    break
+                
+                if chunk.ndim == 1:
+                    chunk = chunk.reshape(-1, 1)
+                
+                chunk_len = len(chunk)
+                end_idx = min(idx + chunk_len, total_samples)
+                audio[idx:end_idx] = chunk[:end_idx-idx]
+                idx = end_idx
+                loaded_size += chunk_len * num_channels * 4
+                
+                # 更新进度 5-15%
+                progress = 5 + (loaded_size / file_size) * 10
+                mb_loaded = loaded_size / (1024 * 1024)
+                mb_total = file_size / (1024 * 1024)
+                self.sub_step.emit(f"加载中... {mb_loaded:.1f}/{mb_total:.1f}MB", int(progress))
+        
+        return audio, sr
+
+    def _build_detailed_data(self, result: dict, duration: float) -> dict:
+        """构建详细时序数据，精确到秒
+        
+        根据 ITU-R BS.1770-5 / EBU Tech 3341:
+        - 短时响度: 3秒滑动窗口，每秒一个数据点
+        - 真峰值: 4x过采样，每秒一个数据点
+        """
+        blocks = result.get('blocks', [])
+        if not blocks:
+            return None
+        
+        block_duration = 0.4  # 每个块400ms
+        
+        # === 1. 整体测量结果 ===
+        summary = {
+            'integrated_loudness': result.get('integrated', -np.inf),
+            'max_short_term': result.get('max_short_term', -np.inf),
+            'max_momentary': result.get('max_momentary', -np.inf),
+            'max_true_peak': result.get('true_peak', -np.inf),
+            'lra': result.get('lra', 0.0),
+            'duration': duration
+        }
+        
+        # === 2. 每秒短时响度 (3秒滑动窗口 = 7.5个块，取整为8个块) ===
+        short_term_per_second = []
+        window_blocks = 8  # 3秒窗口 ≈ 8个400ms块
+        
+        for second in range(int(duration) + 1):
+            start_block = int(second / block_duration)
+            end_block = min(start_block + window_blocks, len(blocks))
+            
+            if start_block < len(blocks):
+                window = blocks[start_block:end_block]
+                valid = [b for b in window if b > -70]
+                if valid:
+                    avg_loudness = float(np.mean(valid))
+                    # 检查是否超标
+                    is_exceed = False
+                    if self.standard:
+                        target = self.standard.integrated_target
+                        tolerance = self.standard.integrated_tolerance
+                        is_exceed = abs(avg_loudness - target) > tolerance
+                    
+                    short_term_per_second.append({
+                        'time': float(second),
+                        'lufs': round(avg_loudness, 2),
+                        'is_exceed': is_exceed
+                    })
+        
+        # === 3. 每秒最大真峰值 ===
+        true_peak_per_second = []
+        
+        for second in range(int(duration) + 1):
+            start_block = int(second / block_duration)
+            end_block = min(start_block + int(1.0 / block_duration), len(blocks))
+            
+            if start_block < len(blocks):
+                window = blocks[start_block:end_block]
+                valid = [b for b in window if b > -70]
+                if valid:
+                    max_loudness = float(np.max(valid))
+                    # 真峰值近似：使用瞬时响度 + 2dB 作为峰值估计
+                    estimated_peak = max_loudness + 2.0
+                    
+                    # 检查是否超标
+                    is_exceed = False
+                    if self.standard:
+                        tp_limit = self.standard.true_peak_limit
+                        is_exceed = estimated_peak > tp_limit
+                    
+                    true_peak_per_second.append({
+                        'time': float(second),
+                        'dbtp': round(estimated_peak, 2),
+                        'is_exceed': is_exceed
+                    })
+        
+        return {
+            'summary': summary,
+            'short_term_per_second': short_term_per_second,
+            'true_peak_per_second': true_peak_per_second
+        }
+
+    def _load_mono_files(self, mono_files):
+        """加载多个单声道文件并显示进度"""
+        total_files = len(mono_files)
+        
+        # 分析所有文件
+        max_samples = 0
+        sr = None
+        for path, name in mono_files:
+            info = sf.info(path)
+            max_samples = max(max_samples, info.frames)
+            if sr is None:
+                sr = info.samplerate
+        
+        num_channels = len(mono_files)
+        audio = np.zeros((max_samples, num_channels), dtype='float32')
+        
+        # 逐个加载
+        for i, (path, name) in enumerate(mono_files):
+            progress = 10 + (i / total_files) * 20
+            self.sub_step.emit(f"加载: {name} ({i+1}/{total_files})", int(progress))
+            
+            data, _ = sf.read(path, dtype='float32')
+            if data.ndim > 1:
+                data = data[:, 0]
+            
+            copy_len = min(len(data), max_samples)
+            audio[:copy_len, i] = data[:copy_len]
+        
+        return audio, sr
+
+
+class LoudnessMeterApp(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("ITU-R BS.1770-5 响度测量仪 v3.1 (整合修复版)")
+        self.setMinimumSize(1280, 620)
+        self.resize(1280, 650)
+        
+        self.current_results = None
+        self.current_file = None
+        self.mono_files = None
+        self.current_standard = LOUDNESS_STANDARDS["EBU R128 (欧洲广播)"]
+        self.worker = None
+        
+        self._setup_ui()
+        self._apply_theme()
+    
+    def _setup_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        main_layout = QHBoxLayout(central)
+        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        
+        left = self._create_left_panel()
+        main_layout.addWidget(left, 35)
+        
+        center = self._create_center_panel()
+        main_layout.addWidget(center, 30)
+        
+        right = self._create_right_panel()
+        main_layout.addWidget(right, 35)
+
+    def _update_mono_files_list(self):
+        """更新多单声道文件列表显示，使用标准声道标识"""
+        if not self.mono_files:
+            self.mono_files_group.setVisible(False)
+            return
+        
+        # 标准声道顺序
+        ch_order = ['L', 'R', 'C', 'LFE', 'Ls', 'Rs', 'Lss', 'Rss', 'Lrs', 'Rrs', 'Ltf', 'Rtf', 'Ltr', 'Rtr', 'Ltb', 'Rtb']
+        
+        def sort_key(item):
+            ch_name = item[1]
+            if ch_name in ch_order:
+                return ch_order.index(ch_name)
+            return 999
+        
+        sorted_files = sorted(self.mono_files, key=sort_key)
+        
+        # 更新表格
+        self.mono_files_table.setRowCount(len(sorted_files))
+        for i, (path, ch_name) in enumerate(sorted_files):
+            # 标准声道标识（加粗绿色）
+            from PySide6.QtGui import QFont
+            ch_item = QTableWidgetItem(ch_name)
+            ch_item.setTextAlignment(Qt.AlignCenter)
+            ch_item.setForeground(QColor('#27ae60'))
+            ch_item.setFont(QFont('Microsoft YaHei', 10, QFont.Bold))
+            self.mono_files_table.setItem(i, 0, ch_item)
+            
+            # 文件名
+            filename = Path(path).name
+            file_item = QTableWidgetItem(filename)
+            file_item.setToolTip(str(path))
+            self.mono_files_table.setItem(i, 1, file_item)
+        
+        self.mono_files_group.setVisible(True)
+        self.mono_files_group.setTitle(f'📋 已加载文件 ({len(sorted_files)}个)')
+
+
+
+    def parse_and_display_adm(self, file_path: str):
+        """解析ADM文件并在UI中显示详细信息"""
+        try:
+            self.adm_info.clear()
+            self.adm_info.setPlainText("正在解析ADM...")
+            QApplication.processEvents()  # 立即更新UI
+            
+            parser = BW64Parser(file_path)
+            adm = parser.parse()
+            
+            if not adm:
+                self.adm_info.setPlainText("[错误] 无法解析ADM元数据\n\n可能原因：\n1. 文件不是有效的ADM/BW64格式\n2. XML命名空间不匹配")
+                return
+            
+            # 检查解析结果是否为空
+            if not adm.channel_formats and not adm.programmes:
+                self.adm_info.setPlainText("[警告] ADM元数据解析为空\n\n可能原因：\n1. 命名空间检测失败\n2. 文件不包含ADM数据")
+                return
+            
+            # 收集信息
+            lines = []
+            lines.append(f"📦 文件: {Path(file_path).name}")
+            lines.append("")
+            
+            # 节目信息
+            if adm.programmes:
+                prog_name = adm.programmes[0].get('name', 'N/A')
+                lines.append(f"🎬 节目: {prog_name}")
+            
+            # 内容统计
+            content_count = len(adm.contents)
+            object_count = len(adm.objects)
+            lines.append(f"📊 内容: {content_count}个Content, {object_count}个Object")
+            
+            # 声床分析
+            direct_speakers = [ch for ch in adm.channel_formats if ch.type == 'DirectSpeakers']
+            objects_ch = [ch for ch in adm.channel_formats if ch.type == 'Objects']
+            
+            lines.append("")
+            lines.append(f"🔊 声床配置 ({len(direct_speakers)} DirectSpeakers):")
+            
+            # 显示声床详情
+            for i, ch in enumerate(direct_speakers[:16]):
+                pos_str = ""
+                if ch.position:
+                    az = ch.position.get('azimuth', 0)
+                    el = ch.position.get('elevation', 0)
+                    pos_str = f"az={az:6.1f}° el={el:6.1f}°"
+                elif ch.speaker_label:
+                    az, el = adm._speaker_label_to_angles(ch.speaker_label)
+                    pos_str = f"az={az:6.1f}° el={el:6.1f}° [{ch.speaker_label}]"
+                
+                lfe_mark = " [LFE]" if ch.is_lfe else ""
+                lines.append(f"  Ch{i:2d}: {ch.name:20s} {pos_str}{lfe_mark}")
+            
+            if len(direct_speakers) > 16:
+                lines.append(f"  ... 还有 {len(direct_speakers)-16} 个声道")
+            
+            # 检测Objects
+            if objects_ch:
+                lines.append("")
+                lines.append(f"⚠️ 包含 {len(objects_ch)} 个动态对象(Object)")
+            
+            # 配置识别 - 兼容新旧版adm_parser
+            ch_count = len(direct_speakers)
+            lines.append("")
+            
+            # 尝试使用新版 detect_configuration 方法
+            detected = None
+            confidence = 0.0
+            description = ""
+            
+            if hasattr(adm, 'detect_configuration'):
+                try:
+                    detected, confidence, description = adm.detect_configuration()
+                except Exception as e:
+                    print(f"[DEBUG] detect_configuration 失败: {e}")
+            
+            if detected and detected != 'unknown':
+                self.config_combo.setCurrentText(detected)
+                lines.append(f"🎯 自动识别为: {description} ({ch_count}ch声床, 置信度{confidence:.0%})")
+            else:
+                # 回退到数量映射
+                cfg_map = {
+                    2: 'stereo', 6: '5.1', 8: '7.1', 
+                    10: '5.1.4', 12: '7.1.4', 16: '9.1.6'
+                }
+                fallback = cfg_map.get(ch_count, '未知')
+                if ch_count in cfg_map:
+                    self.config_combo.setCurrentText(cfg_map[ch_count])
+                else:
+                    self.config_combo.setCurrentText("自动检测")
+                lines.append(f"⚠️ 基于数量识别: {fallback} ({ch_count}ch)")
+                if detected == 'unknown':
+                    lines.append("   (特征识别失败，请手动确认)")
+            
+            # 显示到UI
+            self.adm_info.setPlainText("\n".join(lines))
+            
+            # 更新渲染器与创作软件信息
+            self.renderer_group.setVisible(True)
+            
+            # 渲染器信息
+            if adm.renderer_info:
+                r_info = adm.renderer_info
+                r_text = f"🎚️ {r_info.get('name', '未知渲染器')}"
+                if r_info.get('version'):
+                    r_text += f" v{r_info['version']}"
+                if r_info.get('coordinate_mode'):
+                    r_text += f" [{r_info['coordinate_mode']}]"
+                if r_info.get('uri'):
+                    r_text += f"\n   URI: {r_info['uri']}"
+                if r_info.get('pack_format_refs'):
+                    r_text += f"\n   布局: {', '.join(r_info['pack_format_refs'])}"
+                self.renderer_label.setText(r_text)
+                self.renderer_label.setStyleSheet("color: #f39c12; font-size: 11px;")
+            else:
+                self.renderer_label.setText("🎚️ 未检测到渲染器信息")
+                self.renderer_label.setStyleSheet("color: #888; font-size: 11px;")
+            
+            # 创作软件信息
+            if adm.authoring_info:
+                a_info = adm.authoring_info
+                a_text = ""
+                if a_info.get('authoring_tool'):
+                    a_text += f"🛠️ {a_info['authoring_tool']}"
+                    if a_info.get('authoring_tool_version'):
+                        a_text += f" v{a_info['authoring_tool_version']}"
+                else:
+                    a_text = "🛠️ 未检测到创作软件"
+                self.authoring_label.setText(a_text)
+                self.authoring_label.setStyleSheet("color: #3498db; font-size: 11px;")
+                
+                # 参考布局
+                if a_info.get('reference_layout'):
+                    self.ref_layout_label.setText(f"📐 参考布局: {a_info['reference_layout']}")
+                    self.ref_layout_label.setVisible(True)
+                else:
+                    self.ref_layout_label.setVisible(False)
+            else:
+                self.authoring_label.setText("🛠️ 未检测到创作软件信息")
+                self.authoring_label.setStyleSheet("color: #888; font-size: 11px;")
+                self.ref_layout_label.setVisible(False)
+            
+            # 保存parser供后续使用
+            self.current_adm_parser = parser
+            
+        except Exception as e:
+            error_msg = f"[解析错误] {str(e)}"
+            self.adm_info.setPlainText(error_msg)
+            import traceback
+            print("=" * 60)
+            print("ADM解析错误详情:")
+            print(traceback.format_exc())
+            print("=" * 60)
+
+    
+    def _create_left_panel(self):
+        """显示文件名和路径"""
+        panel = QGroupBox("📁 输入")
+        layout = QVBoxLayout(panel)
+        layout.setSpacing(8)
+        
+        # 输入方式按钮组
+        layout.addWidget(QLabel("输入方式:"))
+        input_btn_layout = QHBoxLayout()
+        
+        self.btn_mono = QPushButton("🎵 多单声道文件")
+        self.btn_mono.setCheckable(True)
+        self.btn_mono.setChecked(True)  # 默认选中
+        self.btn_mono.clicked.connect(lambda: self.on_input_mode_changed('mono'))
+        input_btn_layout.addWidget(self.btn_mono)
+        
+        self.btn_standard = QPushButton("📁 标准多声道文件")
+        self.btn_standard.setCheckable(True)
+        self.btn_standard.clicked.connect(lambda: self.on_input_mode_changed('standard'))
+        input_btn_layout.addWidget(self.btn_standard)
+        
+        self.btn_adm = QPushButton("📦 ADM/BW64文件")
+        self.btn_adm.setCheckable(True)
+        self.btn_adm.clicked.connect(lambda: self.on_input_mode_changed('adm'))
+        input_btn_layout.addWidget(self.btn_adm)
+        
+        layout.addLayout(input_btn_layout)
+        
+        # 按钮样式
+        self._update_input_buttons('mono')
+        
+        # 文件显示
+        file_frame = QFrame()
+        file_frame.setFrameStyle(QFrame.StyledPanel)
+        file_frame.setMinimumHeight(120)
+        file_frame.setMaximumHeight(150)
+        file_layout = QVBoxLayout(file_frame)
+        file_layout.setSpacing(5)
+        
+        self.filename_label = QLabel("未选择文件")
+        self.filename_label.setAlignment(Qt.AlignCenter)
+        self.filename_label.setWordWrap(True)
+        self.filename_label.setStyleSheet("""
+            font-size: 14px; 
+            font-weight: bold; 
+            color: #667eea;
+            padding: 5px;
+        """)
+        file_layout.addWidget(self.filename_label)
+        
+        self.path_label = QLabel("")
+        self.path_label.setAlignment(Qt.AlignCenter)
+        self.path_label.setWordWrap(True)
+        self.path_label.setStyleSheet("""
+            font-size: 10px; 
+            color: #888888;
+            padding: 2px;
+        """)
+        file_layout.addWidget(self.path_label)
+        
+        browse_btn = QPushButton("浏览...")
+        browse_btn.clicked.connect(self.browse)
+        file_layout.addWidget(browse_btn)
+        
+        layout.addWidget(file_frame)
+        
+        # 声道配置
+        cfg_layout = QHBoxLayout()
+        cfg_layout.addWidget(QLabel("声道配置:"))
+        self.config_combo = QComboBox()
+        self.config_combo.addItems(["自动检测", "stereo", "5.1", "5.1.4", "7.1.4"])
+        cfg_layout.addWidget(self.config_combo)
+        layout.addLayout(cfg_layout)
+        
+        # ADM解析信息显示
+        self.adm_info = QTextEdit()
+        self.adm_info.setReadOnly(True)
+        self.adm_info.setPlaceholderText("文件信息将显示在这里...")
+        self.adm_info.setMaximumHeight(180)
+        self.adm_info.setStyleSheet("""
+            QTextEdit {
+                background-color: #16213e;
+                border: 1px solid #667eea;
+                color: #eee;
+                font-family: Consolas, Monaco, monospace;
+                font-size: 11px;
+                padding: 5px;
+            }
+        """)
+        layout.addWidget(self.adm_info)
+        
+        # 渲染器与创作软件信息 (ADM专用)
+        self.renderer_group = QGroupBox("🎛️ 渲染器与创作软件信息")
+        self.renderer_group.setVisible(False)
+        self.renderer_group.setStyleSheet("QGroupBox { border: 1px solid #e74c3c; border-radius: 6px; margin-top: 6px; padding-top: 6px; font-weight: bold; font-size: 11px; } QGroupBox::title { color: #e74c3c; }")
+        renderer_layout = QVBoxLayout(self.renderer_group)
+        renderer_layout.setSpacing(4)
+        renderer_layout.setContentsMargins(8, 8, 8, 8)
+        
+        # 渲染器信息
+        self.renderer_label = QLabel("渲染器: 未检测")
+        self.renderer_label.setStyleSheet("color: #f39c12; font-size: 11px;")
+        self.renderer_label.setWordWrap(True)
+        renderer_layout.addWidget(self.renderer_label)
+        
+        # 创作软件信息
+        self.authoring_label = QLabel("创作软件: 未检测")
+        self.authoring_label.setStyleSheet("color: #3498db; font-size: 11px;")
+        self.authoring_label.setWordWrap(True)
+        renderer_layout.addWidget(self.authoring_label)
+        
+        # 参考布局
+        self.ref_layout_label = QLabel("参考布局: 未检测")
+        self.ref_layout_label.setStyleSheet("color: #9b59b6; font-size: 11px;")
+        self.ref_layout_label.setWordWrap(True)
+        renderer_layout.addWidget(self.ref_layout_label)
+        
+        layout.addWidget(self.renderer_group)
+
+        # === 多单声道文件列表 ===
+        self.mono_files_group = QGroupBox('📋 已加载文件')
+        self.mono_files_group.setVisible(False)
+        self.mono_files_group.setStyleSheet('QGroupBox { border: 1px solid #27ae60; border-radius: 6px; margin-top: 6px; padding-top: 6px; font-weight: bold; font-size: 11px; } QGroupBox::title { color: #27ae60; }')
+        mono_layout = QVBoxLayout(self.mono_files_group)
+        mono_layout.setSpacing(2)
+        mono_layout.setContentsMargins(8, 8, 8, 8)
+        
+        # 文件列表表格
+        self.mono_files_table = QTableWidget(0, 2)
+        self.mono_files_table.setHorizontalHeaderLabels(['声道', '文件名'])
+        self.mono_files_table.verticalHeader().setVisible(False)
+        self.mono_files_table.horizontalHeader().setStretchLastSection(True)
+        self.mono_files_table.setMaximumHeight(600)
+        self.mono_files_table.setStyleSheet('QTableWidget { background-color: #16213e; border: 1px solid #667eea; font-size: 10px; } QHeaderView::section { background-color: #667eea; color: white; padding: 4px; font-size: 10px; } QTableWidget::item { padding: 2px; color: #eee; }')
+        self.mono_files_table.setColumnWidth(0, 50)
+        mono_layout.addWidget(self.mono_files_table, 1)
+        
+        layout.addWidget(self.mono_files_group)
+        
+        layout.addStretch()
+        return panel
+
+    def _update_input_buttons(self, active_mode):
+        """更新输入按钮状态"""
+        default_style = """
+            QPushButton {
+                background-color: #0f3460;
+                border: 1px solid #667eea;
+                padding: 8px 12px;
+                border-radius: 4px;
+                font-size: 12px;
+            }
+            QPushButton:hover { background-color: #667eea; }
+        """
+        
+        active_style = """
+            QPushButton {
+                background-color: #667eea;
+                border: 2px solid #764ba2;
+                padding: 8px 12px;
+                border-radius: 4px;
+                font-size: 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #764ba2; }
+        """
+        
+        self.btn_mono.setStyleSheet(active_style if active_mode == 'mono' else default_style)
+        self.btn_standard.setStyleSheet(active_style if active_mode == 'standard' else default_style)
+        self.btn_adm.setStyleSheet(active_style if active_mode == 'adm' else default_style)
+        
+        self.btn_mono.setChecked(active_mode == 'mono')
+        self.btn_standard.setChecked(active_mode == 'standard')
+        self.btn_adm.setChecked(active_mode == 'adm')
+
+    
+    def _create_center_panel(self):
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setSpacing(8)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        # === 标题栏 ===
+        header_widget = QWidget()
+        header_widget.setMaximumHeight(300)
+        header_widget.setMinimumHeight(200)
+        header_widget.setStyleSheet('QWidget { background-color: #0f3460; border: none;}')
+        header_layout = QVBoxLayout(header_widget)
+        header_layout.setContentsMargins(15, 8, 15, 8)
+        header_layout.setSpacing(3)
+        header_layout.setAlignment(Qt.AlignCenter)
+        
+        # 咿呀服了吗
+        il_label = QLabel('咿呀服了吗')
+        il_label.setStyleSheet('color: #667eea; font-size: 10px; font-weight: thin; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; letter-spacing: 24px; border: none;')
+        il_label.setAlignment(Qt.AlignCenter)
+        header_layout.addWidget(il_label)
+
+        # IL
+        il_label = QLabel('IAFLM')
+        il_label.setStyleSheet('color: #667eea; font-size: 64px; font-weight: bold; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; letter-spacing: 12px; border: none;')
+        il_label.setAlignment(Qt.AlignCenter)
+        header_layout.addWidget(il_label)
+        
+        # Immersive Loudness
+        name_label = QLabel('Immersive Audio File Loudness Meter')
+        name_label.setStyleSheet('color: #a0b4e8; font-size: 13px; font-weight: bold; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; letter-spacing: 3px; border: none;')
+        name_label.setAlignment(Qt.AlignCenter)
+        header_layout.addWidget(name_label)
+        
+        # 底部行
+        bottom_layout = QHBoxLayout()
+        bottom_layout.setSpacing(0)
+        bottom_layout.setContentsMargins(0, 2, 0, 0)
+        bottom_layout.addStretch(1)
+        
+        cn_label = QLabel('沉浸式音频文件响度测量工具')
+        cn_label.setStyleSheet('color: #8899cc; font-size: 10px; font-family: "Microsoft YaHei", "Segoe UI", sans-serif; letter-spacing: 1px; border: none;')
+        cn_label.setAlignment(Qt.AlignCenter)
+        bottom_layout.addWidget(cn_label)
+        bottom_layout.addStretch(2)
+        
+        right_info = QVBoxLayout()
+        right_info.setSpacing(1)
+        right_info.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        
+        version_label = QLabel('v3.1')
+        version_label.setStyleSheet('color: #667eea; font-size: 11px; font-weight: bold;')
+        version_label.setAlignment(Qt.AlignRight)
+        right_info.addWidget(version_label)
+        
+        copyright_label = QLabel('© 2026 Yuan Xuecheng')
+        copyright_label.setStyleSheet('color: #888; font-size: 8px; border: none;')
+        copyright_label.setAlignment(Qt.AlignRight)
+        right_info.addWidget(copyright_label)
+        
+        bottom_layout.addLayout(right_info)
+        header_layout.addLayout(bottom_layout)
+        layout.addWidget(header_widget)
+        
+        # === 原有内容 ===
+        content_widget = QGroupBox('⚙️ 标准与进度')
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setSpacing(8)
+        
+        content_layout.addWidget(QLabel('响度标准:'))
+        self.std_combo = QComboBox()
+        self.std_combo.addItems(list(LOUDNESS_STANDARDS.keys()))
+        self.std_combo.currentTextChanged.connect(self.on_std_changed)
+        content_layout.addWidget(self.std_combo)
+        
+        self.std_info = QLabel()
+        self.std_info.setStyleSheet('background-color: #16213e; padding: 8px; border-radius: 4px;')
+        self.update_std_info()
+        content_layout.addWidget(self.std_info)
+        
+        content_layout.addSpacing(10)
+        content_layout.addWidget(QLabel('当前步骤:'))
+        self.step_label = QLabel('等待开始')
+        self.step_label.setStyleSheet('color: #667eea; font-weight: bold;')
+        content_layout.addWidget(self.step_label)
+        
+        content_layout.addWidget(QLabel('总进度:'))
+        self.progress = QProgressBar()
+        self.progress.setVisible(False)
+        content_layout.addWidget(self.progress)
+        
+        self.process_info = QLabel()
+        self.process_info.setStyleSheet('color: #888; font-size: 11px;')
+        self.process_info.setAlignment(Qt.AlignCenter)
+        content_layout.addWidget(self.process_info)
+        
+        self.start_btn = QPushButton('▶ 开始测量')
+        self.start_btn.setStyleSheet('QPushButton { background-color: #667eea; color: white; font-weight: bold; font-size: 16px; padding: 12px; border-radius: 8px; } QPushButton:hover { background-color: #764ba2; }')
+        self.start_btn.clicked.connect(self.start_measure)
+        content_layout.addWidget(self.start_btn)
+        
+        content_layout.addStretch()
+        layout.addWidget(content_widget)
+        layout.addStretch()
+        return panel
+    def _create_right_panel(self):
+        panel = QGroupBox("📊 结果与导出")
+        layout = QVBoxLayout(panel)
+        layout.setSpacing(8)
+        
+        self.result_table = QTableWidget(5, 2)
+        self.result_table.setHorizontalHeaderLabels(["指标", "数值"])
+        self.result_table.verticalHeader().setVisible(False)
+        self.result_table.horizontalHeader().setStretchLastSection(True)
+        
+        metrics = ["节目响度(I)", "最大短时响度(S)", "最大瞬时响度(M)", "最大真峰值(TP)", "响度范围(LRA)"]
+        for i, m in enumerate(metrics):
+            self.result_table.setItem(i, 0, QTableWidgetItem(m))
+            item = QTableWidgetItem("--")
+            item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.result_table.setItem(i, 1, item)
+        
+        layout.addWidget(self.result_table)
+        
+        status_layout = QHBoxLayout()
+        self.int_status = QLabel("节目响度: --")
+        self.int_status.setAlignment(Qt.AlignCenter)
+        self.int_status.setStyleSheet("padding: 4px; border-radius: 4px;")
+        status_layout.addWidget(self.int_status)
+        
+        self.tp_status = QLabel("峰值: --")
+        self.tp_status.setAlignment(Qt.AlignCenter)
+        self.tp_status.setStyleSheet("padding: 4px; border-radius: 4px;")
+        status_layout.addWidget(self.tp_status)
+        layout.addLayout(status_layout)
+        
+        export_box = QGroupBox("导出")
+        export_layout = QVBoxLayout(export_box)
+        
+        self.export_btn = QPushButton("📄 导出报告...")
+        self.export_btn.setEnabled(False)
+        self.export_btn.clicked.connect(self.export)
+        export_layout.addWidget(self.export_btn)
+        
+        layout.addWidget(export_box)
+        
+        self.status = QLabel("就绪")
+        self.status.setAlignment(Qt.AlignCenter)
+        self.status.setStyleSheet("color: #888; font-size: 11px;")
+        layout.addWidget(self.status)
+        
+        layout.addStretch()
+        return panel
+    
+    def _apply_theme(self):
+        self.setStyleSheet("""
+            QMainWindow { background-color: #1a1a2e; }
+            QWidget { background-color: #1a1a2e; color: #eee; }
+            QGroupBox {
+                border: 2px solid #667eea;
+                border-radius: 8px;
+                margin-top: 8px;
+                padding-top: 8px;
+                font-weight: bold;
+                font-size: 12px;
+            }
+            QGroupBox::title { color: #667eea; }
+            QTableWidget {
+                background-color: #16213e;
+                border: 1px solid #667eea;
+                font-size: 12px;
+            }
+            QHeaderView::section {
+                background-color: #667eea;
+                color: white;
+                padding: 4px;
+            }
+            QPushButton {
+                background-color: #0f3460;
+                border: 1px solid #667eea;
+                padding: 6px 12px;
+                border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #667eea; }
+            QComboBox {
+                background-color: #16213e;
+                border: 1px solid #667eea;
+                padding: 4px;
+            }
+            QProgressBar {
+                border: 1px solid #667eea;
+                border-radius: 4px;
+                text-align: center;
+            }
+            QProgressBar::chunk { background-color: #667eea; }
+            QLabel { font-size: 12px; }
+            QLineEdit {
+                background-color: #16213e;
+                border: 1px solid #667eea;
+                padding: 4px;
+            }
+        """)
+    
+    def update_std_info(self):
+        std = self.current_standard
+        self.std_info.setText(
+            f"目标: {std.integrated_target:+.1f} LUFS (±{std.integrated_tolerance:.1f} LU)\n"
+            f"峰值: {std.true_peak_limit:+.1f} dBTP"
+        )
+    
+    def on_std_changed(self, name):
+        if name in LOUDNESS_STANDARDS:
+            self.current_standard = LOUDNESS_STANDARDS[name]
+            self.update_std_info()
+    
+    def on_input_mode_changed(self, mode):
+        """输入模式切换"""
+        self._update_input_buttons(mode)
+        self.current_file = None
+        self.mono_files = None
+        self.current_adm_parser = None
+        self.filename_label.setText("未选择文件")
+        self.filename_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #667eea;")
+        self.path_label.setText("")
+        self.adm_info.clear()
+        self.adm_info.setPlaceholderText("文件信息将显示在这里...")
+        
+        # 非ADM模式时隐藏渲染器信息区域
+        if hasattr(self, 'renderer_group'):
+            self.renderer_group.setVisible(False)
+        
+        # 非ADM模式时隐藏渲染器信息区域
+        if hasattr(self, 'renderer_group'):
+            self.renderer_group.setVisible(False)
+
+        # 隐藏文件列表
+        if hasattr(self, 'mono_files_group'):
+            self.mono_files_group.setVisible(False)
+
+
+    
+    def browse(self):
+        """浏览文件"""
+        # 确定当前模式
+        if self.btn_mono.isChecked():
+            mode = 'mono'
+        elif self.btn_standard.isChecked():
+            mode = 'standard'
+        elif self.btn_adm.isChecked():
+            mode = 'adm'
+        else:
+            QMessageBox.warning(self, "提示", "请先选择输入方式")
+            return
+        
+        if mode == 'standard':  # 标准文件
+            path, _ = QFileDialog.getOpenFileName(
+                self, "选择音频", "", "音频 (*.wav *.flac *.mp3 *.ogg)"
+            )
+            if path:
+                self.current_file = path
+                p = Path(path)
+                self.filename_label.setText(f"✓ {p.name}")
+                self.filename_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #27ae60;")
+                self.path_label.setText(str(p.parent))
+                
+                info = sf.info(path)
+                self.adm_info.setPlainText(f"{info.channels}ch | {info.samplerate}Hz | {info.duration:.1f}s")
+                
+                cfg_map = {2: 'stereo', 6: '5.1', 8: '7.1', 10: '5.1.4', 12: '7.1.4'}
+                if info.channels in cfg_map:
+                    self.config_combo.setCurrentText(cfg_map[info.channels])
+                
+        elif mode == 'adm':  # ADM
+            path, _ = QFileDialog.getOpenFileName(
+                self, "选择ADM", "", "ADM (*.wav *.bw64 *.adm)"
+            )
+            if path:
+                self.current_file = path
+                p = Path(path)
+                self.filename_label.setText(f"✓ ADM: {p.name}")
+                self.filename_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #e74c3c;")
+                self.path_label.setText(str(p.parent))
+                
+                # 立即解析ADM并显示信息
+                self.parse_and_display_adm(path)
+                
+        elif mode == 'mono':  # 多单声道
+            dlg = SmartMultiMonoDialog(self)
+            if dlg.exec() == QDialog.Accepted:
+                self.mono_files = dlg.get_files()
+                if self.mono_files:
+                    p = Path(self.mono_files[0][0])
+                    self.filename_label.setText(f"✓ {len(self.mono_files)}个单声道文件")
+                    self.filename_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #27ae60;")
+                    self.path_label.setText(str(p.parent))
+                    
+                    ch_names = [ch for _, ch in self.mono_files]
+                    display_names = ' '.join(ch_names[:6])
+                    if len(ch_names) > 6:
+                        display_names += ' ...'
+                    self.adm_info.setPlainText(f"声道: {display_names}")
+                    
+                    cfg_map = {2: 'stereo', 6: '5.1', 10: '5.1.4', 12: '7.1.4'}
+                    if len(self.mono_files) in cfg_map:
+                        self.config_combo.setCurrentText(cfg_map[len(self.mono_files)])
+                                            # 更新文件列表显示
+                    self._update_mono_files_list()
+
+
+    
+    def start_measure(self):
+        input_mode = None
+        input_data = None
+        
+        if self.btn_standard.isChecked() and self.current_file:
+            input_mode = 'file'
+            input_data = self.current_file
+        elif self.btn_adm.isChecked() and self.current_file:
+            input_mode = 'adm'
+            # 使用已解析的parser，避免重复解析
+            if hasattr(self, 'current_adm_parser') and self.current_adm_parser:
+                input_data = self.current_adm_parser
+            else:
+                # 如果没有预解析，重新解析
+                try:
+                    parser = BW64Parser(self.current_file)
+                    parser.parse()
+                    input_data = parser
+                except Exception as e:
+                    QMessageBox.critical(self, "ADM错误", str(e))
+                    return
+        elif self.btn_mono.isChecked() and self.mono_files:
+            input_mode = 'mono_list'
+            input_data = self.mono_files
+        else:
+            QMessageBox.warning(self, "提示", "请先选择输入文件")
+            return
+        
+        # 获取当前声道配置和标准
+        config_name = self.config_combo.currentText()
+        standard = self.current_standard
+        
+        # 创建并启动工作线程
+        self.worker = DetailedMeasurementWorker(input_mode, input_data, config_name, standard)
+        self.worker.sub_step.connect(self.on_sub_step)
+        self.worker.finished_signal.connect(self.on_finished)
+        self.worker.error.connect(self.on_error)
+        
+        # 重置UI状态
+        self.start_btn.setEnabled(False)
+        self.progress.setVisible(True)
+        self.progress.setValue(0)
+        self.export_btn.setEnabled(False)
+        self.current_results = None
+        
+        # 启动线程
+        self.worker.start()
+
+    
+    def on_sub_step(self, step, pct):
+        self.step_label.setText(step)
+        self.progress.setValue(pct)
+        # 更新处理信息（包含倍速）
+        if '⚡' in step:
+            self.process_info.setText(step.split('|')[-1].strip())
+    
+    def on_progress(self, pct, current, total, speed, eta_str):
+        self.progress.setValue(pct)
+        if speed > 0:
+            self.process_info.setText(f"{current:.1f}s/{total:.1f}s | ⚡{speed:.1f}x实时 | {eta_str}")
+        else:
+            self.process_info.setText(f"{current:.1f}s/{total:.1f}s | {eta_str}")
+    
+    def on_finished(self, results):
+        self.current_results = results
+        self.progress.setVisible(False)
+        self.start_btn.setEnabled(True)
+        self.step_label.setText("完成")
+        
+        std = self.current_standard
+        
+        # 更新结果表格
+        data = [
+            (f"{results['integrated']:+.2f}", "LUFS"),
+            (f"{results['short_term']:+.2f}", "LUFS"),
+            (f"{results['momentary']:+.2f}", "LUFS"),
+            (f"{results['true_peak']:+.2f}", "dBTP"),
+            (f"{results['lra']:.2f}", "LU")
+        ]
+        
+        for i, (val, unit) in enumerate(data):
+            item = QTableWidgetItem(f"{val} {unit}")
+            item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.result_table.setItem(i, 1, item)
+        
+        # 更新合规状态
+        int_ok = std.check_integrated(results['integrated'])
+        tp_ok = std.check_true_peak(results['true_peak'])
+        
+        self.int_status.setText(f"节目响度: {'✓' if int_ok else '✗'}")
+        self.int_status.setStyleSheet(f"background-color: {'#27ae60' if int_ok else '#e74c3c'}; color: white; padding: 4px; border-radius: 4px;")
+        
+        self.tp_status.setText(f"峰值: {'✓' if tp_ok else '✗'}")
+        self.tp_status.setStyleSheet(f"background-color: {'#27ae60' if tp_ok else '#e74c3c'}; color: white; padding: 4px; border-radius: 4px;")
+        
+        self.status.setText(f"完成 | 用时{results.get('processing_time', 0):.1f}s")
+        self.export_btn.setEnabled(True)
+    
+    def on_error(self, msg):
+        self.progress.setVisible(False)
+        self.start_btn.setEnabled(True)
+        self.step_label.setText("错误")
+        QMessageBox.critical(self, "错误", msg)
+    
+    def export(self):
+        if not self.current_results:
+            return
+        
+        has_detailed = 'detailed_data' in self.current_results and self.current_results['detailed_data'] is not None
+        dlg = ExportOptionsDialog(has_detailed, self)
+        
+        if dlg.exec() != QDialog.Accepted:
+            return
+        
+        opts = dlg.get_options()
+        fmt = opts['format']
+        
+        std_name = self.current_standard.name.replace(' ', '_')[:15]
+        ext = 'xlsx' if fmt == 'csv' else fmt
+        default = f"report_{std_name}.{ext}"
+        
+        filter_str = "Excel文件 (*.xlsx)" if fmt == 'csv' else f"*.{fmt}"
+        path, _ = QFileDialog.getSaveFileName(self, "导出", default, filter_str)
+        if not path:
+            return
+        
+        try:
+            if fmt == 'csv':
+                self._export_excel_detailed(path, opts)
+            else:
+                results_obj = LoudnessResults(
+                    integrated=self.current_results['integrated'],
+                    short_term=self.current_results['short_term'],
+                    momentary=self.current_results['momentary'],
+                    true_peak=self.current_results['true_peak'],
+                    lra=self.current_results['lra'],
+                    max_true_peak=self.current_results['max_true_peak'],
+                    duration=self.current_results['duration'],
+                    filename=self.current_results.get('filename', 'unknown'),
+                    sample_rate=self.current_results['sample_rate'],
+                    channels=self.current_results['channels'],
+                    blocks=[]
+                )
+                exporter = ReportExporter(results_obj)
+                
+                if fmt == 'txt':
+                    exporter.export_txt(path)
+                elif fmt == 'json':
+                    exporter.export_json(path)
+            
+            self.status.setText(f"已导出: {Path(path).name}")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "导出失败", str(e))
+    
+    def _export_excel_detailed(self, path: str, opts: dict):
+        """导出详细Excel报告 (.xlsx)
+        
+        使用 openpyxl 生成真正的 Excel 文件，实现：
+        - 中文正确显示（微软雅黑字体）
+        - 超标数值用红色粗体 + 浅红色背景标注
+        - 专业的表格格式
+        """
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        except ImportError:
+            QMessageBox.warning(self, "缺少依赖", "请安装 openpyxl: pip install openpyxl")
+            return
+        
+        detailed = self.current_results.get('detailed_data')
+        standard = self.current_standard
+        
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "响度测量报告"
+        
+        # 样式定义
+        title_font = Font(name='微软雅黑', size=14, bold=True, color='2F5496')
+        header_font = Font(name='微软雅黑', size=11, bold=True, color='FFFFFF')
+        header_fill = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
+        normal_font = Font(name='微软雅黑', size=10)
+        red_font = Font(name='微软雅黑', size=10, color='FF0000', bold=True)
+        exceed_fill = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
+        center_align = Alignment(horizontal='center', vertical='center')
+        thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+        
+        row = 1
+        
+        # === 整体测量结果 ===
+        ws.merge_cells(f'A{row}:E{row}')
+        cell = ws.cell(row=row, column=1, value='整体测量结果')
+        cell.font = title_font
+        cell.alignment = center_align
+        row += 2
+        
+        headers = ['指标', '数值', '单位', '标准限值', '状态']
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=row, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = center_align
+            cell.border = thin_border
+        row += 1
+        
+        summary = detailed['summary'] if detailed else {
+            'integrated_loudness': self.current_results['integrated'],
+            'max_short_term': self.current_results['short_term'],
+            'max_momentary': self.current_results['momentary'],
+            'max_true_peak': self.current_results['true_peak'],
+            'lra': self.current_results['lra'],
+            'duration': self.current_results['duration']
+        }
+        
+        # 节目响度
+        int_val = summary['integrated_loudness']
+        int_target = standard.integrated_target
+        int_tol = standard.integrated_tolerance
+        int_status = '合格' if abs(int_val - int_target) <= int_tol else '超标'
+        is_exceed = int_status == '超标'
+        ws.cell(row=row, column=1, value='节目响度').font = normal_font
+        ws.cell(row=row, column=2, value=f'{int_val:+.2f}').font = red_font if is_exceed else normal_font
+        ws.cell(row=row, column=3, value='LUFS').font = normal_font
+        ws.cell(row=row, column=4, value=f'{int_target:+.1f} ± {int_tol:.1f}').font = normal_font
+        status_cell = ws.cell(row=row, column=5, value=int_status)
+        status_cell.font = red_font if is_exceed else normal_font
+        if is_exceed:
+            status_cell.fill = exceed_fill
+        for col in range(1, 6):
+            ws.cell(row=row, column=col).border = thin_border
+            ws.cell(row=row, column=col).alignment = center_align
+        row += 1
+        
+        # 最大短时响度
+        st_val = summary['max_short_term']
+        ws.cell(row=row, column=1, value='最大短时响度').font = normal_font
+        ws.cell(row=row, column=2, value=f'{st_val:+.2f}').font = normal_font
+        ws.cell(row=row, column=3, value='LUFS').font = normal_font
+        ws.cell(row=row, column=4, value='-').font = normal_font
+        ws.cell(row=row, column=5, value='合格').font = normal_font
+        for col in range(1, 6):
+            ws.cell(row=row, column=col).border = thin_border
+            ws.cell(row=row, column=col).alignment = center_align
+        row += 1
+        
+        # 最大瞬时响度
+        mom_val = summary['max_momentary']
+        ws.cell(row=row, column=1, value='最大瞬时响度').font = normal_font
+        ws.cell(row=row, column=2, value=f'{mom_val:+.2f}').font = normal_font
+        ws.cell(row=row, column=3, value='LUFS').font = normal_font
+        ws.cell(row=row, column=4, value='-').font = normal_font
+        ws.cell(row=row, column=5, value='合格').font = normal_font
+        for col in range(1, 6):
+            ws.cell(row=row, column=col).border = thin_border
+            ws.cell(row=row, column=col).alignment = center_align
+        row += 1
+        
+        # 最大真峰值
+        tp_val = summary['max_true_peak']
+        tp_limit = standard.true_peak_limit
+        tp_status = '合格' if tp_val <= tp_limit else '超标'
+        is_exceed = tp_status == '超标'
+        ws.cell(row=row, column=1, value='最大真峰值').font = normal_font
+        ws.cell(row=row, column=2, value=f'{tp_val:+.2f}').font = red_font if is_exceed else normal_font
+        ws.cell(row=row, column=3, value='dBTP').font = normal_font
+        ws.cell(row=row, column=4, value=f'≤ {tp_limit:+.1f}').font = normal_font
+        status_cell = ws.cell(row=row, column=5, value=tp_status)
+        status_cell.font = red_font if is_exceed else normal_font
+        if is_exceed:
+            status_cell.fill = exceed_fill
+        for col in range(1, 6):
+            ws.cell(row=row, column=col).border = thin_border
+            ws.cell(row=row, column=col).alignment = center_align
+        row += 1
+        
+        # 响度范围
+        lra_val = summary['lra']
+        ws.cell(row=row, column=1, value='响度范围(LRA)').font = normal_font
+        ws.cell(row=row, column=2, value=f'{lra_val:.2f}').font = normal_font
+        ws.cell(row=row, column=3, value='LU').font = normal_font
+        ws.cell(row=row, column=4, value='-').font = normal_font
+        ws.cell(row=row, column=5, value='参考').font = normal_font
+        for col in range(1, 6):
+            ws.cell(row=row, column=col).border = thin_border
+            ws.cell(row=row, column=col).alignment = center_align
+        row += 1
+        
+        # 时长
+        ws.cell(row=row, column=1, value='测量时长').font = normal_font
+        ws.cell(row=row, column=2, value=f"{summary['duration']:.2f}").font = normal_font
+        ws.cell(row=row, column=3, value='秒').font = normal_font
+        ws.cell(row=row, column=4, value='-').font = normal_font
+        ws.cell(row=row, column=5, value='-').font = normal_font
+        for col in range(1, 6):
+            ws.cell(row=row, column=col).border = thin_border
+            ws.cell(row=row, column=col).alignment = center_align
+        row += 2
+        
+        # === 每秒短时响度 ===
+        if detailed and detailed.get('short_term_per_second'):
+            ws.merge_cells(f'A{row}:C{row}')
+            cell = ws.cell(row=row, column=1, value='每秒短时响度 (3秒滑动窗口)')
+            cell.font = title_font
+            cell.alignment = Alignment(horizontal='left', vertical='center')
+            row += 2
+            
+            st_headers = ['时间(秒)', '短时响度(LUFS)', '状态']
+            for col, header in enumerate(st_headers, 1):
+                cell = ws.cell(row=row, column=col, value=header)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = center_align
+                cell.border = thin_border
+            row += 1
+            
+            for item in detailed['short_term_per_second']:
+                time_sec = item['time']
+                lufs = item['lufs']
+                is_exceed = item.get('is_exceed', False)
+                
+                ws.cell(row=row, column=1, value=f'{time_sec:.1f}').font = normal_font
+                ws.cell(row=row, column=1).alignment = center_align
+                ws.cell(row=row, column=1).border = thin_border
+                
+                lufs_cell = ws.cell(row=row, column=2, value=f'{lufs:+.2f}')
+                lufs_cell.font = red_font if is_exceed else normal_font
+                lufs_cell.alignment = center_align
+                lufs_cell.border = thin_border
+                if is_exceed:
+                    lufs_cell.fill = exceed_fill
+                
+                status_cell = ws.cell(row=row, column=3, value='超标' if is_exceed else '合格')
+                status_cell.font = red_font if is_exceed else normal_font
+                status_cell.alignment = center_align
+                status_cell.border = thin_border
+                if is_exceed:
+                    status_cell.fill = exceed_fill
+                
+                row += 1
+            
+            row += 1
+        
+        # === 每秒最大真峰值 ===
+        if detailed and detailed.get('true_peak_per_second'):
+            ws.merge_cells(f'A{row}:D{row}')
+            cell = ws.cell(row=row, column=1, value='每秒最大真峰值')
+            cell.font = title_font
+            cell.alignment = Alignment(horizontal='left', vertical='center')
+            row += 2
+            
+            tp_headers = ['时间(秒)', '真峰值(dBTP)', '标准限值', '状态']
+            for col, header in enumerate(tp_headers, 1):
+                cell = ws.cell(row=row, column=col, value=header)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = center_align
+                cell.border = thin_border
+            row += 1
+            
+            for item in detailed['true_peak_per_second']:
+                time_sec = item['time']
+                dbtp = item['dbtp']
+                is_exceed = item.get('is_exceed', False)
+                
+                ws.cell(row=row, column=1, value=f'{time_sec:.1f}').font = normal_font
+                ws.cell(row=row, column=1).alignment = center_align
+                ws.cell(row=row, column=1).border = thin_border
+                
+                dbtp_cell = ws.cell(row=row, column=2, value=f'{dbtp:+.2f}')
+                dbtp_cell.font = red_font if is_exceed else normal_font
+                dbtp_cell.alignment = center_align
+                dbtp_cell.border = thin_border
+                if is_exceed:
+                    dbtp_cell.fill = exceed_fill
+                
+                ws.cell(row=row, column=3, value=f'≤ {tp_limit:+.1f}').font = normal_font
+                ws.cell(row=row, column=3).alignment = center_align
+                ws.cell(row=row, column=3).border = thin_border
+                
+                status_cell = ws.cell(row=row, column=4, value='超标' if is_exceed else '合格')
+                status_cell.font = red_font if is_exceed else normal_font
+                status_cell.alignment = center_align
+                status_cell.border = thin_border
+                if is_exceed:
+                    status_cell.fill = exceed_fill
+                
+                row += 1
+            
+            row += 1
+        
+        # === 页脚 ===
+        ws.merge_cells(f'A{row}:E{row}')
+        cell = ws.cell(row=row, column=1, value='测量标准信息')
+        cell.font = title_font
+        cell.alignment = Alignment(horizontal='left', vertical='center')
+        row += 2
+        
+        footer_data = [
+            ['标准名称', standard.name],
+            ['节目响度目标', f'{standard.integrated_target:+.1f} LUFS (±{standard.integrated_tolerance:.1f} LU)'],
+            ['真峰值限值', f'{standard.true_peak_limit:+.1f} dBTP'],
+            ['测量时间', time.strftime('%Y-%m-%d %H:%M:%S')],
+            ['文件名', self.current_results.get('filename', 'unknown')]
+        ]
+        
+        for label, value in footer_data:
+            ws.cell(row=row, column=1, value=label).font = normal_font
+            ws.cell(row=row, column=1).alignment = Alignment(horizontal='left', vertical='center')
+            ws.cell(row=row, column=2, value=value).font = normal_font
+            ws.cell(row=row, column=2).alignment = Alignment(horizontal='left', vertical='center')
+            row += 1
+        
+        # 调整列宽
+        ws.column_dimensions['A'].width = 20
+        ws.column_dimensions['B'].width = 18
+        ws.column_dimensions['C'].width = 12
+        ws.column_dimensions['D'].width = 18
+        ws.column_dimensions['E'].width = 12
+        
+        wb.save(path)
+        print(f'[Excel导出] 已保存到: {path}')
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setStyle('Fusion')
+    win = LoudnessMeterApp()
+    win.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
