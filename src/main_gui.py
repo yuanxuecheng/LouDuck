@@ -2343,6 +2343,17 @@ class LoudnessMeterApp(QMainWindow):
         for col in range(1, 6):
             ws.cell(row=row, column=col).border = thin_border
             ws.cell(row=row, column=col).alignment = center_align
+        row += 1
+        
+        # 测量时间
+        ws.cell(row=row, column=1, value='测量时间').font = normal_font
+        ws.cell(row=row, column=2, value=time.strftime('%Y-%m-%d %H:%M:%S')).font = normal_font
+        ws.cell(row=row, column=3, value='-').font = normal_font
+        ws.cell(row=row, column=4, value='-').font = normal_font
+        ws.cell(row=row, column=5, value='-').font = normal_font
+        for col in range(1, 6):
+            ws.cell(row=row, column=col).border = thin_border
+            ws.cell(row=row, column=col).alignment = center_align
         row += 2
         
         # === 每秒短时响度 ===
@@ -2435,33 +2446,6 @@ class LoudnessMeterApp(QMainWindow):
                 
                 row += 1
             
-            row += 1
-        
-        # === 页脚 ===
-        ws.merge_cells(f'A{row}:E{row}')
-        cell = ws.cell(row=row, column=1, value='测量标准信息')
-        cell.font = title_font
-        cell.alignment = Alignment(horizontal='left', vertical='center')
-        row += 2
-        
-        footer_data = [
-            ['标准名称', standard.name],
-            ['节目响度目标', f'{standard.integrated_target:+.1f} LUFS (±{standard.integrated_tolerance:.1f} LU)'],
-            ['真峰值限值', f'{standard.true_peak_limit:+.1f} dBTP'],
-            ['测量时间', time.strftime('%Y-%m-%d %H:%M:%S')],
-            ['文件路径', fi.get('file_path', '-')],
-            ['文件名称', fi.get('file_name', self.current_results.get('filename', 'unknown'))]
-        ]
-        if fi.get('renderer_info'):
-            footer_data.append(['渲染器', fi['renderer_info']])
-        if fi.get('authoring_info'):
-            footer_data.append(['创作软件', fi['authoring_info']])
-        
-        for label, value in footer_data:
-            ws.cell(row=row, column=1, value=label).font = normal_font
-            ws.cell(row=row, column=1).alignment = Alignment(horizontal='left', vertical='center')
-            ws.cell(row=row, column=2, value=value).font = normal_font
-            ws.cell(row=row, column=2).alignment = Alignment(horizontal='left', vertical='center')
             row += 1
         
         # 调整列宽
