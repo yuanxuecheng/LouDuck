@@ -12,15 +12,21 @@ import soundfile as sf
 import numpy as np
 import time
 import re
+import json
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, Optional, List, Tuple
+
+# 最近文件持久化路径
+RECENT_FILES_PATH = Path(__file__).parent.parent / ".recent_files.json"
+MAX_RECENT_FILES = 10
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QProgressBar, QTableWidget,
     QTableWidgetItem, QGroupBox, QMessageBox, QComboBox, QDialog,
     QListWidget, QAbstractItemView, QDialogButtonBox, QLineEdit,
-    QFrame, QCheckBox, QSpinBox, QTextEdit, QSizePolicy
+    QFrame, QCheckBox, QSpinBox, QTextEdit, QSizePolicy,
+    QButtonGroup, QScrollArea, QGridLayout
 )
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QFont, QColor
@@ -951,6 +957,11 @@ class LoudnessMeterApp(QMainWindow):
         self.mono_files = None
         self.current_standard = LOUDNESS_STANDARDS["GY/T 282-2014 (中国广电-电视)"]
         self.worker = None
+        self.recent_files: List[str] = []
+        self._load_recent_files()
+        
+        # 启用拖放
+        self.setAcceptDrops(True)
         
         self._setup_ui()
         self._apply_theme()
@@ -1168,180 +1179,514 @@ class LoudnessMeterApp(QMainWindow):
 
     
     def _create_left_panel(self):
-        """显示文件名和路径"""
+        """左侧面板：输入方式、文件信息、模式专属区域（支持滚动）"""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+
         panel = QGroupBox("📁 输入")
+        panel.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                font-size: 13px;
+                border: 1px solid #667eea;
+                border-radius: 8px;
+                margin-top: 10px;
+                padding-top: 8px;
+                padding-bottom: 8px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+                color: #667eea;
+            }
+        """)
         layout = QVBoxLayout(panel)
-        layout.setSpacing(8)
-        
-        # 输入方式按钮组
-        layout.addWidget(QLabel("输入方式:"))
-        input_btn_layout = QHBoxLayout()
-        
-        self.btn_mono = QPushButton("🎵 多单声道文件")
-        self.btn_mono.setCheckable(True)
-        self.btn_mono.setChecked(True)  # 默认选中
+        layout.setSpacing(12)
+        layout.setContentsMargins(14, 14, 14, 14)
+
+        # === 1. 输入方式分段按钮 ===
+        mode_group = QGroupBox("输入方式")
+        mode_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 12px;
+                border: 1px solid #0f3460;
+            }
+            QGroupBox::title { color: #aaa; }
+        """)
+        mode_layout = QHBoxLayout(mode_group)
+        mode_layout.setSpacing(4)
+
+        self.mode_button_group = QButtonGroup(self)
+        self.mode_button_group.setExclusive(True)
+
+        self.btn_mono = QPushButton("🎵 多单声道")
+        self.btn_standard = QPushButton("📁 标准多声道")
+        self.btn_adm = QPushButton("📦 ADM/BW64")
+
+        for btn in (self.btn_mono, self.btn_standard, self.btn_adm):
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            self.mode_button_group.addButton(btn)
+
         self.btn_mono.clicked.connect(lambda: self.on_input_mode_changed('mono'))
-        input_btn_layout.addWidget(self.btn_mono)
-        
-        self.btn_standard = QPushButton("📁 标准多声道文件")
-        self.btn_standard.setCheckable(True)
         self.btn_standard.clicked.connect(lambda: self.on_input_mode_changed('standard'))
-        input_btn_layout.addWidget(self.btn_standard)
-        
-        self.btn_adm = QPushButton("📦 ADM/BW64文件")
-        self.btn_adm.setCheckable(True)
         self.btn_adm.clicked.connect(lambda: self.on_input_mode_changed('adm'))
-        input_btn_layout.addWidget(self.btn_adm)
-        
-        layout.addLayout(input_btn_layout)
-        
-        # 按钮样式
-        self._update_input_buttons('mono')
-        
-        # 文件显示
-        file_frame = QFrame()
-        file_frame.setFrameStyle(QFrame.StyledPanel)
-        file_frame.setMinimumHeight(120)
-        file_frame.setMaximumHeight(150)
-        file_layout = QVBoxLayout(file_frame)
-        file_layout.setSpacing(5)
-        
+
+        mode_layout.addWidget(self.btn_mono)
+        mode_layout.addWidget(self.btn_standard)
+        mode_layout.addWidget(self.btn_adm)
+        layout.addWidget(mode_group)
+
+        self._mode_style_default = """
+            QPushButton {
+                background-color: #0f3460;
+                border: 1px solid #667eea;
+                padding: 8px 10px;
+                border-radius: 4px;
+                font-size: 12px;
+                color: #ccc;
+            }
+            QPushButton:hover { background-color: #1a4a7a; }
+        """
+        self._mode_style_active = """
+            QPushButton {
+                background-color: #667eea;
+                border: 2px solid #764ba2;
+                padding: 8px 10px;
+                border-radius: 4px;
+                font-size: 12px;
+                font-weight: bold;
+                color: white;
+            }
+            QPushButton:hover { background-color: #764ba2; }
+        """
+        self._update_mode_buttons('mono')
+
+        # === 2. 文件信息卡片 ===
+        # === 2. 文件信息卡片（标准/ADM 模式显示） ===
+        self.file_info_group = QGroupBox("文件信息")
+        self.file_info_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 12px;
+                border: 1px solid #3498db;
+            }
+            QGroupBox::title { color: #3498db; }
+        """)
+        file_layout = QVBoxLayout(self.file_info_group)
+        file_layout.setSpacing(8)
+
         self.filename_label = QLabel("未选择文件")
         self.filename_label.setAlignment(Qt.AlignCenter)
         self.filename_label.setWordWrap(True)
         self.filename_label.setStyleSheet("""
-            font-size: 14px; 
-            font-weight: bold; 
+            font-size: 15px;
+            font-weight: bold;
             color: #667eea;
-            padding: 5px;
+            padding: 4px;
         """)
         file_layout.addWidget(self.filename_label)
-        
+
         self.path_label = QLabel("")
         self.path_label.setAlignment(Qt.AlignCenter)
         self.path_label.setWordWrap(True)
         self.path_label.setStyleSheet("""
-            font-size: 10px; 
+            font-size: 10px;
             color: #888888;
             padding: 2px;
         """)
         file_layout.addWidget(self.path_label)
-        
+
+        # 元数据网格
+        meta_widget = QWidget()
+        meta_layout = QGridLayout(meta_widget)
+        meta_layout.setSpacing(6)
+        meta_layout.setContentsMargins(0, 4, 0, 4)
+        meta_layout.setColumnStretch(1, 1)
+        meta_layout.setColumnStretch(3, 1)
+
+        self.file_meta_labels: Dict[str, QLabel] = {}
+        meta_fields = [
+            ('format', '格式'), ('channels', '声道'),
+            ('samplerate', '采样率'), ('bit_depth', '位深'),
+            ('duration', '时长'), ('file_size', '大小'),
+        ]
+        for i, (key, name) in enumerate(meta_fields):
+            row, col = divmod(i, 2)
+            lbl_name = QLabel(f"{name}:")
+            lbl_name.setStyleSheet("color: #aaa; font-size: 11px;")
+            lbl_val = QLabel("-")
+            lbl_val.setStyleSheet("color: #eee; font-size: 11px; font-weight: bold;")
+            self.file_meta_labels[key] = lbl_val
+            meta_layout.addWidget(lbl_name, row, col * 2)
+            meta_layout.addWidget(lbl_val, row, col * 2 + 1)
+        file_layout.addWidget(meta_widget)
+
+        layout.addWidget(self.file_info_group)
+
+        # === 浏览 + 最近文件（永久显示） ===
+        action_row = QHBoxLayout()
+        self.recent_combo = QComboBox()
+        self.recent_combo.setPlaceholderText("最近打开的文件...")
+        self.recent_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #0f3460;
+                border: 1px solid #667eea;
+                padding: 4px;
+                font-size: 11px;
+                color: #eee;
+            }
+            QComboBox::drop-down { border: none; }
+            QComboBox QAbstractItemView {
+                background-color: #0f3460;
+                color: #eee;
+                selection-background-color: #667eea;
+            }
+        """)
+        self.recent_combo.currentIndexChanged.connect(self._on_recent_selected)
+        action_row.addWidget(self.recent_combo, 1)
+
         browse_btn = QPushButton("浏览...")
+        browse_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #667eea;
+                border: none;
+                padding: 6px 14px;
+                border-radius: 4px;
+                font-size: 12px;
+                color: white;
+            }
+            QPushButton:hover { background-color: #764ba2; }
+        """)
         browse_btn.clicked.connect(self.browse)
-        file_layout.addWidget(browse_btn)
-        
-        layout.addWidget(file_frame)
-        
-        # 声道配置
+        action_row.addWidget(browse_btn)
+        layout.addLayout(action_row)
+
+        # === 3. 模式专属区域 ===
+        # -- 标准多声道 --
+        self.standard_section = QWidget()
+        standard_layout = QVBoxLayout(self.standard_section)
+        standard_layout.setContentsMargins(0, 0, 0, 0)
+        standard_layout.setSpacing(8)
+
         cfg_layout = QHBoxLayout()
         cfg_layout.addWidget(QLabel("声道配置:"))
         self.config_combo = QComboBox()
         self.config_combo.addItems(["自动检测", "stereo", "5.1", "7.1", "5.1.4", "7.1.2", "7.1.4"])
+        self.config_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #0f3460;
+                border: 1px solid #667eea;
+                padding: 4px;
+                font-size: 12px;
+                color: #eee;
+            }
+        """)
         cfg_layout.addWidget(self.config_combo)
-        layout.addLayout(cfg_layout)
-        
-        # ADM解析信息显示
+        standard_layout.addLayout(cfg_layout)
+        standard_layout.addStretch()
+        layout.addWidget(self.standard_section)
+
+        # -- ADM/BW64 --
+        self.adm_section = QWidget()
+        adm_layout = QVBoxLayout(self.adm_section)
+        adm_layout.setContentsMargins(0, 0, 0, 0)
+        adm_layout.setSpacing(8)
+
         self.adm_info = QTextEdit()
         self.adm_info.setReadOnly(True)
-        self.adm_info.setPlaceholderText("文件信息将显示在这里...")
-        self.adm_info.setMaximumHeight(180)
+        self.adm_info.setPlaceholderText("ADM文件信息将显示在这里...")
+        self.adm_info.setMaximumHeight(200)
         self.adm_info.setStyleSheet("""
             QTextEdit {
                 background-color: #16213e;
-                border: 1px solid #667eea;
+                border: 1px solid #e74c3c;
                 color: #eee;
                 font-family: Consolas, Monaco, monospace;
                 font-size: 11px;
                 padding: 5px;
             }
         """)
-        layout.addWidget(self.adm_info)
-        
-        # 渲染器与创作软件信息 (ADM专用)
+        adm_layout.addWidget(self.adm_info)
+
         self.renderer_group = QGroupBox("🎛️ 渲染器与创作软件信息")
         self.renderer_group.setVisible(False)
-        self.renderer_group.setStyleSheet("QGroupBox { border: 1px solid #e74c3c; border-radius: 6px; margin-top: 6px; padding-top: 6px; font-weight: bold; font-size: 11px; } QGroupBox::title { color: #e74c3c; }")
+        self.renderer_group.setStyleSheet("""
+            QGroupBox {
+                border: 1px solid #e74c3c;
+                border-radius: 6px;
+                margin-top: 6px;
+                padding-top: 6px;
+                font-weight: bold;
+                font-size: 11px;
+            }
+            QGroupBox::title { color: #e74c3c; }
+        """)
         renderer_layout = QVBoxLayout(self.renderer_group)
-        renderer_layout.setSpacing(4)
-        renderer_layout.setContentsMargins(8, 8, 8, 8)
-        
-        # 渲染器信息
+        renderer_layout.setSpacing(6)
+        renderer_layout.setContentsMargins(10, 10, 10, 10)
+
         self.renderer_label = QLabel("渲染器: 未检测")
         self.renderer_label.setStyleSheet("color: #f39c12; font-size: 11px;")
         self.renderer_label.setWordWrap(True)
         renderer_layout.addWidget(self.renderer_label)
-        
-        # 创作软件信息
+
         self.authoring_label = QLabel("创作软件: 未检测")
         self.authoring_label.setStyleSheet("color: #3498db; font-size: 11px;")
         self.authoring_label.setWordWrap(True)
         renderer_layout.addWidget(self.authoring_label)
-        
-        # 参考布局
+
         self.ref_layout_label = QLabel("参考布局: 未检测")
         self.ref_layout_label.setStyleSheet("color: #9b59b6; font-size: 11px;")
         self.ref_layout_label.setWordWrap(True)
         renderer_layout.addWidget(self.ref_layout_label)
-        
-        layout.addWidget(self.renderer_group)
 
-        # === 多单声道文件列表 ===
+        adm_layout.addWidget(self.renderer_group)
+        adm_layout.addStretch()
+        layout.addWidget(self.adm_section)
+
+        # -- 多单声道 --
+        self.mono_section = QWidget()
+        mono_layout = QVBoxLayout(self.mono_section)
+        mono_layout.setContentsMargins(0, 0, 0, 0)
+        mono_layout.setSpacing(8)
+
         self.mono_files_group = QGroupBox('📋 已加载文件')
         self.mono_files_group.setVisible(False)
         self.mono_files_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-        self.mono_files_group.setStyleSheet('QGroupBox { border: 1px solid #27ae60; border-radius: 6px; margin-top: 6px; padding-top: 6px; font-weight: bold; font-size: 11px; } QGroupBox::title { color: #27ae60; }')
-        mono_layout = QVBoxLayout(self.mono_files_group)
-        mono_layout.setSpacing(2)
-        mono_layout.setContentsMargins(8, 8, 8, 8)
-        
-        # 文件列表表格
+        self.mono_files_group.setStyleSheet("""
+            QGroupBox {
+                border: 1px solid #27ae60;
+                border-radius: 6px;
+                margin-top: 6px;
+                padding-top: 6px;
+                font-weight: bold;
+                font-size: 11px;
+            }
+            QGroupBox::title { color: #27ae60; }
+        """)
+        mono_files_layout = QVBoxLayout(self.mono_files_group)
+        mono_files_layout.setSpacing(4)
+        mono_files_layout.setContentsMargins(10, 10, 10, 10)
+
         self.mono_files_table = QTableWidget(0, 2)
         self.mono_files_table.setHorizontalHeaderLabels(['声道', '文件名'])
         self.mono_files_table.verticalHeader().setVisible(False)
         self.mono_files_table.horizontalHeader().setStretchLastSection(True)
-        self.mono_files_table.setMinimumHeight(200)
-        self.mono_files_table.setStyleSheet('QTableWidget { background-color: #16213e; border: 1px solid #667eea; font-size: 10px; } QHeaderView::section { background-color: #667eea; color: white; padding: 4px; font-size: 10px; } QTableWidget::item { padding: 2px; color: #eee; }')
-        self.mono_files_table.setColumnWidth(0, 50)
-        mono_layout.addWidget(self.mono_files_table, 1)
-        
-        layout.addWidget(self.mono_files_group, 1)
-        
-        layout.addStretch(0)
-        return panel
+        self.mono_files_table.setMinimumHeight(180)
+        self.mono_files_table.setStyleSheet("""
+            QTableWidget {
+                background-color: #16213e;
+                border: 1px solid #27ae60;
+                font-size: 10px;
+            }
+            QHeaderView::section {
+                background-color: #27ae60;
+                color: white;
+                padding: 4px;
+                font-size: 10px;
+            }
+            QTableWidget::item {
+                padding: 2px;
+                color: #eee;
+            }
+        """)
+        self.mono_files_table.setColumnWidth(0, 55)
+        mono_files_layout.addWidget(self.mono_files_table, 1)
 
-    def _update_input_buttons(self, active_mode):
-        """更新输入按钮状态"""
-        default_style = """
-            QPushButton {
-                background-color: #0f3460;
-                border: 1px solid #667eea;
-                padding: 8px 12px;
-                border-radius: 4px;
-                font-size: 12px;
-            }
-            QPushButton:hover { background-color: #667eea; }
-        """
-        
-        active_style = """
-            QPushButton {
-                background-color: #667eea;
-                border: 2px solid #764ba2;
-                padding: 8px 12px;
-                border-radius: 4px;
-                font-size: 12px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #764ba2; }
-        """
-        
-        self.btn_mono.setStyleSheet(active_style if active_mode == 'mono' else default_style)
-        self.btn_standard.setStyleSheet(active_style if active_mode == 'standard' else default_style)
-        self.btn_adm.setStyleSheet(active_style if active_mode == 'adm' else default_style)
-        
+        mono_layout.addWidget(self.mono_files_group, 1)
+        mono_layout.addStretch()
+        layout.addWidget(self.mono_section, 1)
+
+        layout.addStretch(0)
+        scroll.setWidget(panel)
+
+        # 初始化显隐
+        self._update_mode_ui('mono')
+
+        return scroll
+
+    def _update_mode_buttons(self, active_mode: str):
+        """更新输入模式按钮样式"""
+        self.btn_mono.setStyleSheet(
+            self._mode_style_active if active_mode == 'mono' else self._mode_style_default
+        )
+        self.btn_standard.setStyleSheet(
+            self._mode_style_active if active_mode == 'standard' else self._mode_style_default
+        )
+        self.btn_adm.setStyleSheet(
+            self._mode_style_active if active_mode == 'adm' else self._mode_style_default
+        )
+
         self.btn_mono.setChecked(active_mode == 'mono')
         self.btn_standard.setChecked(active_mode == 'standard')
         self.btn_adm.setChecked(active_mode == 'adm')
+
+    def _update_mode_ui(self, mode: str):
+        """根据模式切换左侧各区块显隐"""
+        self.standard_section.setVisible(mode == 'standard')
+        self.adm_section.setVisible(mode == 'adm')
+        self.mono_section.setVisible(mode == 'mono')
+
+    def _clear_file_metadata(self):
+        """清空文件元数据显示"""
+        for lbl in self.file_meta_labels.values():
+            lbl.setText("-")
+            lbl.setStyleSheet("color: #eee; font-size: 11px; font-weight: bold;")
+
+    def _update_file_metadata(self, path: str):
+        """读取并显示文件元数据"""
+        try:
+            info = sf.info(path)
+            p = Path(path)
+            size = p.stat().st_size
+            size_str = self._format_file_size(size)
+
+            self.file_meta_labels['format'].setText(p.suffix.lstrip('.').upper())
+            self.file_meta_labels['channels'].setText(str(info.channels))
+            self.file_meta_labels['samplerate'].setText(f"{info.samplerate} Hz")
+            self.file_meta_labels['bit_depth'].setText(str(info.subtype_info))
+            self.file_meta_labels['duration'].setText(f"{info.duration:.2f} s")
+            self.file_meta_labels['file_size'].setText(size_str)
+        except Exception as e:
+            print(f"[元数据读取失败] {e}")
+            self._clear_file_metadata()
+
+    @staticmethod
+    def _format_file_size(size_bytes: int) -> str:
+        """格式化文件大小"""
+        if size_bytes < 1024:
+            return f"{size_bytes} B"
+        elif size_bytes < 1024 * 1024:
+            return f"{size_bytes / 1024:.1f} KB"
+        elif size_bytes < 1024 * 1024 * 1024:
+            return f"{size_bytes / (1024 * 1024):.1f} MB"
+        else:
+            return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
+
+    def _load_recent_files(self):
+        """加载最近文件列表"""
+        try:
+            if RECENT_FILES_PATH.exists():
+                data = json.loads(RECENT_FILES_PATH.read_text(encoding='utf-8'))
+                self.recent_files = [p for p in data if Path(p).exists()][:MAX_RECENT_FILES]
+        except Exception as e:
+            print(f"[最近文件加载失败] {e}")
+            self.recent_files = []
+
+    def _save_recent_files(self):
+        """保存最近文件列表"""
+        try:
+            RECENT_FILES_PATH.write_text(
+                json.dumps(self.recent_files, ensure_ascii=False, indent=2),
+                encoding='utf-8'
+            )
+        except Exception as e:
+            print(f"[最近文件保存失败] {e}")
+
+    def _add_recent_file(self, path: str):
+        """添加文件到最近列表"""
+        if path in self.recent_files:
+            self.recent_files.remove(path)
+        self.recent_files.insert(0, path)
+        self.recent_files = self.recent_files[:MAX_RECENT_FILES]
+        self._save_recent_files()
+        self._update_recent_combo()
+
+    def _update_recent_combo(self):
+        """刷新最近文件下拉框"""
+        self.recent_combo.blockSignals(True)
+        self.recent_combo.clear()
+        for p in self.recent_files:
+            self.recent_combo.addItem(Path(p).name, p)
+        self.recent_combo.blockSignals(False)
+
+    def _on_recent_selected(self, index: int):
+        """从最近文件选择"""
+        if index < 0:
+            return
+        path = self.recent_combo.itemData(index)
+        if not path or not Path(path).exists():
+            return
+        self._load_file_by_path(path)
+
+    def dragEnterEvent(self, event):
+        """拖拽进入"""
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        """拖拽放下"""
+        urls = event.mimeData().urls()
+        if not urls:
+            return
+        path = urls[0].toLocalFile()
+        if not path:
+            return
+        self._load_file_by_path(path)
+
+    def _load_file_by_path(self, path: str):
+        """根据路径自动判断模式并加载文件"""
+        p = Path(path)
+        ext = p.suffix.lower()
+
+        if ext in ('.wav', '.bw64', '.adm'):
+            # 尝试判断是否为ADM
+            try:
+                if is_adm_file(path):
+                    self.btn_adm.setChecked(True)
+                    self.on_input_mode_changed('adm')
+                    self.current_file = path
+                    self.filename_label.setText(f"✓ ADM: {p.name}")
+                    self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #e74c3c;")
+                    self.path_label.setText(str(p.parent))
+                    self._update_file_metadata(path)
+                    self.parse_and_display_adm(path)
+                    self._add_recent_file(path)
+                    return
+            except Exception:
+                pass
+
+        # 标准音频
+        if ext in ('.wav', '.flac', '.mp3', '.ogg'):
+            try:
+                info = sf.info(path)
+                if info.channels == 1:
+                    # 单声道文件拖到主窗口 -> 触发多单声道对话框
+                    self.btn_mono.setChecked(True)
+                    self.on_input_mode_changed('mono')
+                    # 这里简化处理：只加载一个文件，让用户继续添加
+                    self.current_file = path
+                    self.filename_label.setText(f"✓ {p.name} (请在浏览中添加更多)")
+                    self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #f39c12;")
+                    self.path_label.setText(str(p.parent))
+                    self._update_file_metadata(path)
+                    self._add_recent_file(path)
+                    return
+                else:
+                    self.btn_standard.setChecked(True)
+                    self.on_input_mode_changed('standard')
+                    self.current_file = path
+                    self.filename_label.setText(f"✓ {p.name}")
+                    self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #27ae60;")
+                    self.path_label.setText(str(p.parent))
+                    self._update_file_metadata(path)
+
+                    cfg_map = {2: 'stereo', 6: '5.1', 8: '7.1', 10: '5.1.4', 12: '7.1.4'}
+                    if info.channels in cfg_map:
+                        self.config_combo.setCurrentText(cfg_map[info.channels])
+
+                    self._add_recent_file(path)
+                    return
+            except Exception as e:
+                QMessageBox.warning(self, "文件错误", f"无法读取文件:\n{e}")
+                return
+
+        QMessageBox.warning(self, "不支持的文件", f"无法识别该文件类型:\n{p.name}")
 
     
     def _create_center_panel(self):
@@ -1579,29 +1924,29 @@ class LoudnessMeterApp(QMainWindow):
     
     def on_input_mode_changed(self, mode):
         """输入模式切换"""
-        self._update_input_buttons(mode)
+        self._update_mode_buttons(mode)
+        self._update_mode_ui(mode)
         self.current_file = None
         self.mono_files = None
         self.current_adm_parser = None
-        self.filename_label.setText("未选择文件")
-        self.filename_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #667eea;")
-        self.path_label.setText("")
-        self.adm_info.clear()
-        self.adm_info.setPlaceholderText("文件信息将显示在这里...")
-        
-        # 非ADM模式时隐藏渲染器信息区域
+
+        # 文件信息框：仅标准/ADM模式显示
+        if hasattr(self, 'file_info_group'):
+            self.file_info_group.setVisible(mode != 'mono')
+        if hasattr(self, 'filename_label'):
+            self.filename_label.setText("未选择文件")
+            self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #667eea;")
+        if hasattr(self, 'path_label'):
+            self.path_label.setText("")
+        self._clear_file_metadata()
+
+        if hasattr(self, 'adm_info'):
+            self.adm_info.clear()
+            self.adm_info.setPlaceholderText("ADM文件信息将显示在这里...")
         if hasattr(self, 'renderer_group'):
             self.renderer_group.setVisible(False)
-        
-        # 模式对应的显隐控制
-        if mode == 'mono':
-            self.adm_info.setVisible(False)
-            if hasattr(self, 'mono_files_group'):
-                self.mono_files_group.setVisible(False)
-        else:
-            self.adm_info.setVisible(True)
-            if hasattr(self, 'mono_files_group'):
-                self.mono_files_group.setVisible(False)
+        if hasattr(self, 'mono_files_group'):
+            self.mono_files_group.setVisible(False)
 
 
     
@@ -1626,16 +1971,16 @@ class LoudnessMeterApp(QMainWindow):
                 self.current_file = path
                 p = Path(path)
                 self.filename_label.setText(f"✓ {p.name}")
-                self.filename_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #27ae60;")
+                self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #27ae60;")
                 self.path_label.setText(str(p.parent))
-                
+                self._update_file_metadata(path)
+                self._add_recent_file(path)
+
                 info = sf.info(path)
-                self.adm_info.setPlainText(f"{info.channels}ch | {info.samplerate}Hz | {info.duration:.1f}s")
-                
                 cfg_map = {2: 'stereo', 6: '5.1', 8: '7.1', 10: '5.1.4', 12: '7.1.4'}
                 if info.channels in cfg_map:
                     self.config_combo.setCurrentText(cfg_map[info.channels])
-                
+
         elif mode == 'adm':  # ADM
             path, _ = QFileDialog.getOpenFileName(
                 self, "选择ADM", "", "ADM (*.wav *.bw64 *.adm)"
@@ -1644,12 +1989,14 @@ class LoudnessMeterApp(QMainWindow):
                 self.current_file = path
                 p = Path(path)
                 self.filename_label.setText(f"✓ ADM: {p.name}")
-                self.filename_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #e74c3c;")
+                self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #e74c3c;")
                 self.path_label.setText(str(p.parent))
-                
+                self._update_file_metadata(path)
+                self._add_recent_file(path)
+
                 # 立即解析ADM并显示信息
                 self.parse_and_display_adm(path)
-                
+
         elif mode == 'mono':  # 多单声道
             dlg = SmartMultiMonoDialog(self)
             if dlg.exec() == QDialog.Accepted:
@@ -1657,13 +2004,13 @@ class LoudnessMeterApp(QMainWindow):
                 if self.mono_files:
                     p = Path(self.mono_files[0][0])
                     self.filename_label.setText(f"✓ {len(self.mono_files)}个单声道文件")
-                    self.filename_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #27ae60;")
+                    self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #27ae60;")
                     self.path_label.setText(str(p.parent))
-                    
+
                     cfg_map = {2: 'stereo', 6: '5.1', 8: '7.1', 10: '5.1.4', 12: '7.1.4'}
                     if len(self.mono_files) in cfg_map:
                         self.config_combo.setCurrentText(cfg_map[len(self.mono_files)])
-                    
+
                     # 更新文件列表显示
                     self._update_mono_files_list()
 
