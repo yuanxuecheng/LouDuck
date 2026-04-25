@@ -2213,6 +2213,7 @@ class LoudnessMeterApp(QMainWindow):
         row += 2
         
         file_info_rows = [
+            ['测量时间', time.strftime('%Y-%m-%d %H:%M:%S')],
             ['文件路径', fi.get('file_path', '-')],
             ['文件名称', fi.get('file_name', self.current_results.get('filename', 'unknown'))],
         ]
@@ -2345,15 +2346,6 @@ class LoudnessMeterApp(QMainWindow):
             ws.cell(row=row, column=col).alignment = center_align
         row += 1
         
-        # 测量时间
-        ws.cell(row=row, column=1, value='测量时间').font = normal_font
-        ws.cell(row=row, column=2, value=time.strftime('%Y-%m-%d %H:%M:%S')).font = normal_font
-        ws.cell(row=row, column=3, value='-').font = normal_font
-        ws.cell(row=row, column=4, value='-').font = normal_font
-        ws.cell(row=row, column=5, value='-').font = normal_font
-        for col in range(1, 6):
-            ws.cell(row=row, column=col).border = thin_border
-            ws.cell(row=row, column=col).alignment = center_align
         row += 2
         
         # === 每秒短时响度 ===
