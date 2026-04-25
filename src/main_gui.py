@@ -2004,6 +2004,8 @@ class LoudnessMeterApp(QMainWindow):
             self.process_info.setText(f"{current:.1f}s/{total:.1f}s | {eta_str}")
     
     def on_finished(self, results):
+        # 合并文件信息到结果
+        results['file_info'] = self._build_file_info()
         self.current_results = results
         self.progress.setVisible(False)
         self.start_btn.setEnabled(True)
@@ -2046,6 +2048,71 @@ class LoudnessMeterApp(QMainWindow):
         self.step_label.setText("错误")
         QMessageBox.critical(self, "错误", msg)
     
+    def _build_file_info(self) -> dict:
+        """构建当前被测文件信息字典"""
+        info = {
+            'mode': 'unknown',
+            'file_path': '',
+            'file_name': '',
+            'adm_info': '',
+            'renderer_info': '',
+            'authoring_info': '',
+            'ref_layout': '',
+            'mono_files': []
+        }
+        
+        if self.btn_standard.isChecked() and self.current_file:
+            info['mode'] = 'standard'
+            info['file_path'] = str(Path(self.current_file).parent)
+            info['file_name'] = Path(self.current_file).name
+            
+        elif self.btn_adm.isChecked() and self.current_file:
+            info['mode'] = 'adm'
+            info['file_path'] = str(Path(self.current_file).parent)
+            info['file_name'] = Path(self.current_file).name
+            if hasattr(self, 'adm_info'):
+                info['adm_info'] = self.adm_info.toPlainText()
+            if hasattr(self, 'renderer_label'):
+                info['renderer_info'] = self.renderer_label.text()
+            if hasattr(self, 'authoring_label'):
+                info['authoring_info'] = self.authoring_label.text()
+            if hasattr(self, 'ref_layout_label'):
+                info['ref_layout'] = self.ref_layout_label.text()
+                
+        elif self.btn_mono.isChecked() and self.mono_files:
+            info['mode'] = 'mono'
+            info['file_path'] = str(Path(self.mono_files[0][0]).parent)
+            info['file_name'] = f"{len(self.mono_files)}个单声道文件"
+            info['mono_files'] = [
+                {'path': path, 'channel': ch, 'name': Path(path).name}
+                for path, ch in self.mono_files
+            ]
+        
+        return info
+    
+    def _get_export_base_name(self) -> str:
+        """生成导出文件名基础部分（取自被测文件共有名）"""
+        if self.btn_standard.isChecked() and self.current_file:
+            return Path(self.current_file).stem
+        elif self.btn_adm.isChecked() and self.current_file:
+            return Path(self.current_file).stem
+        elif self.btn_mono.isChecked() and self.mono_files:
+            stems = [Path(p).stem for p, _ in self.mono_files]
+            if not stems:
+                return "report"
+            # 求共有前缀
+            common = stems[0]
+            for s in stems[1:]:
+                i = 0
+                while i < len(common) and i < len(s) and common[i] == s[i]:
+                    i += 1
+                common = common[:i]
+            common = common.rstrip('._-')
+            if common:
+                return common
+            return stems[0]
+        return "report"
+
     def export_direct(self, fmt):
         if not self.current_results:
             return
@@ -2053,7 +2120,8 @@ class LoudnessMeterApp(QMainWindow):
         std_name = self.current_standard.name.replace(' ', '_')[:15]
         ext_map = {'txt': 'txt', 'json': 'json', 'excel': 'xlsx'}
         ext = ext_map.get(fmt, fmt)
-        default = f"report_{std_name}.{ext}"
+        base = self._get_export_base_name()
+        default = f"{base}_{std_name}.{ext}"
         
         filter_map = {
             'txt': "文本文件 (*.txt)",
@@ -2066,6 +2134,7 @@ class LoudnessMeterApp(QMainWindow):
             return
         
         try:
+            fi = self.current_results.get('file_info', {})
             if fmt == 'excel':
                 self._export_excel_detailed(path, {})
             else:
@@ -2080,7 +2149,14 @@ class LoudnessMeterApp(QMainWindow):
                     filename=self.current_results.get('filename', 'unknown'),
                     sample_rate=self.current_results['sample_rate'],
                     channels=self.current_results['channels'],
-                    blocks=[]
+                    blocks=[],
+                    file_path=fi.get('file_path', ''),
+                    file_name=fi.get('file_name', ''),
+                    adm_info=fi.get('adm_info', ''),
+                    renderer_info=fi.get('renderer_info', ''),
+                    authoring_info=fi.get('authoring_info', ''),
+                    ref_layout=fi.get('ref_layout', ''),
+                    mono_files=fi.get('mono_files', [])
                 )
                 exporter = ReportExporter(results_obj)
                 
@@ -2127,6 +2203,38 @@ class LoudnessMeterApp(QMainWindow):
         thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
         
         row = 1
+        
+        # === 被测文件信息 ===
+        fi = self.current_results.get('file_info', {})
+        ws.merge_cells(f'A{row}:E{row}')
+        cell = ws.cell(row=row, column=1, value='被测文件信息')
+        cell.font = title_font
+        cell.alignment = Alignment(horizontal='left', vertical='center')
+        row += 2
+        
+        file_info_rows = [
+            ['文件路径', fi.get('file_path', '-')],
+            ['文件名称', fi.get('file_name', self.current_results.get('filename', 'unknown'))],
+        ]
+        if fi.get('adm_info'):
+            file_info_rows.append(['ADM 信息', fi['adm_info'].replace('\n', ' | ')[:200]])
+        if fi.get('renderer_info'):
+            file_info_rows.append(['渲染器', fi['renderer_info']])
+        if fi.get('authoring_info'):
+            file_info_rows.append(['创作软件', fi['authoring_info']])
+        if fi.get('ref_layout'):
+            file_info_rows.append(['参考布局', fi['ref_layout']])
+        if fi.get('mono_files'):
+            for item in fi['mono_files']:
+                file_info_rows.append([f"声道 {item.get('channel', '?')}", item.get('name', '')])
+        
+        for label, value in file_info_rows:
+            ws.cell(row=row, column=1, value=label).font = normal_font
+            ws.cell(row=row, column=1).alignment = Alignment(horizontal='left', vertical='center')
+            ws.cell(row=row, column=2, value=value).font = normal_font
+            ws.cell(row=row, column=2).alignment = Alignment(horizontal='left', vertical='center')
+            row += 1
+        row += 1
         
         # === 整体测量结果 ===
         ws.merge_cells(f'A{row}:E{row}')
@@ -2341,8 +2449,13 @@ class LoudnessMeterApp(QMainWindow):
             ['节目响度目标', f'{standard.integrated_target:+.1f} LUFS (±{standard.integrated_tolerance:.1f} LU)'],
             ['真峰值限值', f'{standard.true_peak_limit:+.1f} dBTP'],
             ['测量时间', time.strftime('%Y-%m-%d %H:%M:%S')],
-            ['文件名', self.current_results.get('filename', 'unknown')]
+            ['文件路径', fi.get('file_path', '-')],
+            ['文件名称', fi.get('file_name', self.current_results.get('filename', 'unknown'))]
         ]
+        if fi.get('renderer_info'):
+            footer_data.append(['渲染器', fi['renderer_info']])
+        if fi.get('authoring_info'):
+            footer_data.append(['创作软件', fi['authoring_info']])
         
         for label, value in footer_data:
             ws.cell(row=row, column=1, value=label).font = normal_font
