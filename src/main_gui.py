@@ -2217,8 +2217,6 @@ class LoudnessMeterApp(QMainWindow):
             ['文件路径', fi.get('file_path', '-')],
             ['文件名称', fi.get('file_name', self.current_results.get('filename', 'unknown'))],
         ]
-        if fi.get('adm_info'):
-            file_info_rows.append(['ADM 信息', fi['adm_info'].replace('\n', ' | ')[:200]])
         if fi.get('renderer_info'):
             file_info_rows.append(['渲染器', fi['renderer_info']])
         if fi.get('authoring_info'):
@@ -2235,6 +2233,19 @@ class LoudnessMeterApp(QMainWindow):
             ws.cell(row=row, column=2, value=value).font = normal_font
             ws.cell(row=row, column=2).alignment = Alignment(horizontal='left', vertical='center')
             row += 1
+        
+        # ADM 信息单独处理：保留换行，合并单元格并自动换行显示
+        if fi.get('adm_info'):
+            ws.cell(row=row, column=1, value='ADM 信息').font = normal_font
+            ws.cell(row=row, column=1).alignment = Alignment(horizontal='left', vertical='top')
+            adm_cell = ws.cell(row=row, column=2, value=fi['adm_info'])
+            adm_cell.font = Font(name='Consolas', size=9)
+            adm_cell.alignment = Alignment(horizontal='left', vertical='top', wrap_text=True)
+            ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=5)
+            line_count = fi['adm_info'].count('\n') + 1
+            ws.row_dimensions[row].height = max(30, line_count * 14)
+            row += 1
+        
         row += 1
         
         # === 整体测量结果 ===
