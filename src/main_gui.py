@@ -12,14 +12,9 @@ import soundfile as sf
 import numpy as np
 import time
 import re
-import json
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, Optional, List, Tuple
-
-# 最近文件持久化路径
-RECENT_FILES_PATH = Path(__file__).parent.parent / ".recent_files.json"
-MAX_RECENT_FILES = 10
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QProgressBar, QTableWidget,
@@ -957,8 +952,6 @@ class LoudnessMeterApp(QMainWindow):
         self.mono_files = None
         self.current_standard = LOUDNESS_STANDARDS["GY/T 282-2014 (中国广电-电视)"]
         self.worker = None
-        self.recent_files: List[str] = []
-        self._load_recent_files()
         
         # 启用拖放
         self.setAcceptDrops(True)
@@ -985,7 +978,8 @@ class LoudnessMeterApp(QMainWindow):
     def _update_mono_files_list(self):
         """更新多单声道文件列表显示，使用标准声道标识"""
         if not self.mono_files:
-            self.mono_files_group.setVisible(False)
+            self.mono_files_table.setRowCount(0)
+            self.mono_files_group.setTitle('📋 已加载文件')
             return
         
         # 标准声道顺序
@@ -1328,28 +1322,7 @@ class LoudnessMeterApp(QMainWindow):
 
         layout.addWidget(self.file_info_group)
 
-        # === 浏览 + 最近文件（永久显示） ===
-        action_row = QHBoxLayout()
-        self.recent_combo = QComboBox()
-        self.recent_combo.setPlaceholderText("最近打开的文件...")
-        self.recent_combo.setStyleSheet("""
-            QComboBox {
-                background-color: #0f3460;
-                border: 1px solid #667eea;
-                padding: 4px;
-                font-size: 11px;
-                color: #eee;
-            }
-            QComboBox::drop-down { border: none; }
-            QComboBox QAbstractItemView {
-                background-color: #0f3460;
-                color: #eee;
-                selection-background-color: #667eea;
-            }
-        """)
-        self.recent_combo.currentIndexChanged.connect(self._on_recent_selected)
-        action_row.addWidget(self.recent_combo, 1)
-
+        # === 浏览按钮（永久显示） ===
         browse_btn = QPushButton("浏览...")
         browse_btn.setStyleSheet("""
             QPushButton {
@@ -1363,8 +1336,7 @@ class LoudnessMeterApp(QMainWindow):
             QPushButton:hover { background-color: #764ba2; }
         """)
         browse_btn.clicked.connect(self.browse)
-        action_row.addWidget(browse_btn)
-        layout.addLayout(action_row)
+        layout.addWidget(browse_btn)
 
         # === 3. 模式专属区域 ===
         # -- 标准多声道 --
@@ -1456,7 +1428,6 @@ class LoudnessMeterApp(QMainWindow):
         mono_layout.setSpacing(8)
 
         self.mono_files_group = QGroupBox('📋 已加载文件')
-        self.mono_files_group.setVisible(False)
         self.mono_files_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self.mono_files_group.setStyleSheet("""
             QGroupBox {
@@ -1531,6 +1502,8 @@ class LoudnessMeterApp(QMainWindow):
         self.standard_section.setVisible(mode == 'standard')
         self.adm_section.setVisible(mode == 'adm')
         self.mono_section.setVisible(mode == 'mono')
+        if hasattr(self, 'file_info_group'):
+            self.file_info_group.setVisible(mode != 'mono')
 
     def _clear_file_metadata(self):
         """清空文件元数据显示"""
@@ -1568,52 +1541,6 @@ class LoudnessMeterApp(QMainWindow):
         else:
             return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
 
-    def _load_recent_files(self):
-        """加载最近文件列表"""
-        try:
-            if RECENT_FILES_PATH.exists():
-                data = json.loads(RECENT_FILES_PATH.read_text(encoding='utf-8'))
-                self.recent_files = [p for p in data if Path(p).exists()][:MAX_RECENT_FILES]
-        except Exception as e:
-            print(f"[最近文件加载失败] {e}")
-            self.recent_files = []
-
-    def _save_recent_files(self):
-        """保存最近文件列表"""
-        try:
-            RECENT_FILES_PATH.write_text(
-                json.dumps(self.recent_files, ensure_ascii=False, indent=2),
-                encoding='utf-8'
-            )
-        except Exception as e:
-            print(f"[最近文件保存失败] {e}")
-
-    def _add_recent_file(self, path: str):
-        """添加文件到最近列表"""
-        if path in self.recent_files:
-            self.recent_files.remove(path)
-        self.recent_files.insert(0, path)
-        self.recent_files = self.recent_files[:MAX_RECENT_FILES]
-        self._save_recent_files()
-        self._update_recent_combo()
-
-    def _update_recent_combo(self):
-        """刷新最近文件下拉框"""
-        self.recent_combo.blockSignals(True)
-        self.recent_combo.clear()
-        for p in self.recent_files:
-            self.recent_combo.addItem(Path(p).name, p)
-        self.recent_combo.blockSignals(False)
-
-    def _on_recent_selected(self, index: int):
-        """从最近文件选择"""
-        if index < 0:
-            return
-        path = self.recent_combo.itemData(index)
-        if not path or not Path(path).exists():
-            return
-        self._load_file_by_path(path)
-
     def dragEnterEvent(self, event):
         """拖拽进入"""
         if event.mimeData().hasUrls():
@@ -1646,7 +1573,6 @@ class LoudnessMeterApp(QMainWindow):
                     self.path_label.setText(str(p.parent))
                     self._update_file_metadata(path)
                     self.parse_and_display_adm(path)
-                    self._add_recent_file(path)
                     return
             except Exception:
                 pass
@@ -1665,7 +1591,6 @@ class LoudnessMeterApp(QMainWindow):
                     self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #f39c12;")
                     self.path_label.setText(str(p.parent))
                     self._update_file_metadata(path)
-                    self._add_recent_file(path)
                     return
                 else:
                     self.btn_standard.setChecked(True)
@@ -1680,7 +1605,6 @@ class LoudnessMeterApp(QMainWindow):
                     if info.channels in cfg_map:
                         self.config_combo.setCurrentText(cfg_map[info.channels])
 
-                    self._add_recent_file(path)
                     return
             except Exception as e:
                 QMessageBox.warning(self, "文件错误", f"无法读取文件:\n{e}")
@@ -1974,7 +1898,6 @@ class LoudnessMeterApp(QMainWindow):
                 self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #27ae60;")
                 self.path_label.setText(str(p.parent))
                 self._update_file_metadata(path)
-                self._add_recent_file(path)
 
                 info = sf.info(path)
                 cfg_map = {2: 'stereo', 6: '5.1', 8: '7.1', 10: '5.1.4', 12: '7.1.4'}
@@ -1992,7 +1915,6 @@ class LoudnessMeterApp(QMainWindow):
                 self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #e74c3c;")
                 self.path_label.setText(str(p.parent))
                 self._update_file_metadata(path)
-                self._add_recent_file(path)
 
                 # 立即解析ADM并显示信息
                 self.parse_and_display_adm(path)
