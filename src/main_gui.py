@@ -1316,7 +1316,7 @@ class LoudnessMeterApp(QMainWindow):
         right_info.setSpacing(1)
         right_info.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         
-        version_label = QLabel('v3.1')
+        version_label = QLabel('v3.1  (build 260427)')
         version_label.setStyleSheet('color: #667eea; font-size: 11px; font-weight: bold;')
         version_label.setAlignment(Qt.AlignRight)
         right_info.addWidget(version_label)

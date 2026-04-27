@@ -80,6 +80,7 @@ def create_spec_file(project_dir, src_dir, icon_path, output_dir):
     adm_parser = str(src_dir / 'adm_parser.py').replace('\\', '/')
     itu1770 = str(src_dir / 'itu1770_meter.py').replace('\\', '/')
     report_exporter = str(src_dir / 'report_exporter.py').replace('\\', '/')
+    mono_matcher = str(src_dir / 'mono_channel_matcher.py').replace('\\', '/')
     main_script = str(src_dir / 'main_gui.py').replace('\\', '/')
     
     icon_str = f"icon='{icon_path.replace(chr(92), '/')}'," if icon_path else ""
@@ -98,6 +99,7 @@ a = Analysis(
         ('{adm_parser}', '.'),
         ('{itu1770}', '.'),
         ('{report_exporter}', '.'),
+        ('{mono_matcher}', '.'),
     ],
     hiddenimports=[
         # PySide6
