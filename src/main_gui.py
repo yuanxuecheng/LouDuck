@@ -1283,19 +1283,19 @@ class LoudnessMeterApp(QMainWindow):
         header_layout.setAlignment(Qt.AlignCenter)
         
         # 咿呀服了吗
-        il_label = QLabel('咿呀服了吗')
+        il_label = QLabel('咿了吗')
         il_label.setStyleSheet('color: #667eea; font-size: 10px; font-weight: thin; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; letter-spacing: 24px; border: none;')
         il_label.setAlignment(Qt.AlignCenter)
         header_layout.addWidget(il_label)
 
         # IL
-        il_label = QLabel('IAFLM')
+        il_label = QLabel('ILM')
         il_label.setStyleSheet('color: #667eea; font-size: 64px; font-weight: bold; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; letter-spacing: 12px; border: none;')
         il_label.setAlignment(Qt.AlignCenter)
         header_layout.addWidget(il_label)
         
         # Immersive Loudness
-        name_label = QLabel('Immersive Audio File Loudness Meter')
+        name_label = QLabel('Immersive audiofile Loudness Meter')
         name_label.setStyleSheet('color: #a0b4e8; font-size: 13px; font-weight: bold; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; letter-spacing: 3px; border: none;')
         name_label.setAlignment(Qt.AlignCenter)
         header_layout.addWidget(name_label)
