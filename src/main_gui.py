@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QGroupBox, QMessageBox, QComboBox, QDialog,
     QListWidget, QAbstractItemView, QDialogButtonBox, QLineEdit,
     QFrame, QCheckBox, QSpinBox, QTextEdit, QSizePolicy,
-    QButtonGroup, QScrollArea, QGridLayout
+    QButtonGroup, QScrollArea, QGridLayout, QStyledItemDelegate
 )
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QFont, QColor
@@ -68,6 +68,7 @@ LOUDNESS_STANDARDS = {
 from mono_channel_matcher import (
     SmartMultiMonoDialog,
     CHANNEL_TEMPLATES,
+    auto_match_mono_files,
 )
 
 
@@ -460,45 +461,42 @@ class LoudnessMeterApp(QMainWindow):
         main_layout.addWidget(right, 35)
 
     def _update_mono_files_list(self):
-        """更新多单声道文件列表显示，使用标准声道标识"""
+        """更新多单声道文件列表显示，支持编辑声道和顺序"""
+        self.mono_files_table.blockSignals(True)
         if not self.mono_files:
             self.mono_files_table.setRowCount(0)
-            self.mono_files_group.setTitle('📋 已加载文件')
+            self.mono_files_group.setTitle('📋 声道匹配 (双击声道可编辑)')
+            self.mono_files_table.blockSignals(False)
             return
-        
-        # 标准声道顺序
-        ch_order = ['L', 'R', 'C', 'LFE', 'Ls', 'Rs', 'Lss', 'Rss', 'Lrs', 'Rrs', 'Ltf', 'Rtf', 'Ltr', 'Rtr', 'Ltb', 'Rtb']
-        
-        def sort_key(item):
-            ch_name = item[1]
-            if ch_name in ch_order:
-                return ch_order.index(ch_name)
-            return 999
-        
-        sorted_files = sorted(self.mono_files, key=sort_key)
-        
-        # 更新表格
-        self.mono_files_table.setRowCount(len(sorted_files))
-        for i, (path, ch_name) in enumerate(sorted_files):
-            # 标准声道标识（加粗绿色）
-            from PySide6.QtGui import QFont
+
+        self.mono_files_table.setRowCount(len(self.mono_files))
+        for i, (path, ch_name) in enumerate(self.mono_files):
+            # 序号
+            num_item = QTableWidgetItem(str(i + 1))
+            num_item.setTextAlignment(Qt.AlignCenter)
+            num_item.setFlags(num_item.flags() & ~Qt.ItemIsEditable)
+            self.mono_files_table.setItem(i, 0, num_item)
+
+            # 声道（可编辑，有代理下拉框）
             ch_item = QTableWidgetItem(ch_name)
             ch_item.setTextAlignment(Qt.AlignCenter)
-            ch_item.setForeground(QColor('#27ae60'))
-            ch_item.setFont(QFont('Microsoft YaHei', 10, QFont.Bold))
-            self.mono_files_table.setItem(i, 0, ch_item)
-            
+            if ch_name == '?':
+                ch_item.setForeground(QColor('#e74c3c'))
+            else:
+                ch_item.setForeground(QColor('#27ae60'))
+            self.mono_files_table.setItem(i, 1, ch_item)
+
             # 文件名
             filename = Path(path).name
             file_item = QTableWidgetItem(filename)
             file_item.setToolTip(str(path))
-            self.mono_files_table.setItem(i, 1, file_item)
-        
+            file_item.setFlags(file_item.flags() & ~Qt.ItemIsEditable)
+            self.mono_files_table.setItem(i, 2, file_item)
+
         self.mono_files_group.setVisible(True)
-        self.mono_files_group.setTitle(f'📋 已加载文件 ({len(sorted_files)}个)')
-
-
-
+        matched = sum(1 for _, ch in self.mono_files if ch != '?')
+        self.mono_files_group.setTitle(f'📋 声道匹配 ({matched}/{len(self.mono_files)} 已匹配)')
+        self.mono_files_table.blockSignals(False)
     def parse_and_display_adm(self, file_path: str):
         """解析ADM文件并在UI中显示详细信息"""
         try:
@@ -911,7 +909,77 @@ class LoudnessMeterApp(QMainWindow):
         mono_layout.setContentsMargins(0, 0, 0, 0)
         mono_layout.setSpacing(8)
 
-        self.mono_files_group = QGroupBox('📋 已加载文件')
+        # 模板选择 + 控制按钮
+        ctrl_layout = QHBoxLayout()
+        ctrl_layout.setSpacing(6)
+        ctrl_layout.addWidget(QLabel("声道模板:"))
+        self.mono_template_combo = QComboBox()
+        self.mono_template_combo.addItems([
+            "自动检测", "Stereo (2.0)", "5.1 (6ch)", "7.1 (8ch)",
+            "7.1.2 (10ch)", "5.1.4 (10ch)", "7.1.4 (12ch)", "自定义"
+        ])
+        self.mono_template_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #0f3460;
+                border: 1px solid #27ae60;
+                padding: 4px;
+                font-size: 12px;
+                color: #eee;
+            }
+        """)
+        ctrl_layout.addWidget(self.mono_template_combo, 1)
+
+        self.mono_match_btn = QPushButton("🎯 自动匹配")
+        self.mono_match_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #27ae60;
+                border: none;
+                padding: 5px 10px;
+                border-radius: 4px;
+                font-size: 11px;
+                color: white;
+            }
+            QPushButton:hover { background-color: #2ecc71; }
+            QPushButton:disabled { background-color: #1e8449; color: #aaa; }
+        """)
+        self.mono_match_btn.clicked.connect(self._on_mono_auto_match)
+        ctrl_layout.addWidget(self.mono_match_btn)
+
+        self.mono_up_btn = QPushButton("⬆️")
+        self.mono_up_btn.setToolTip("上移")
+        self.mono_up_btn.setStyleSheet("QPushButton { padding: 5px 8px; font-size: 11px; }")
+        self.mono_up_btn.clicked.connect(self._on_mono_move_up)
+        ctrl_layout.addWidget(self.mono_up_btn)
+
+        self.mono_down_btn = QPushButton("⬇️")
+        self.mono_down_btn.setToolTip("下移")
+        self.mono_down_btn.setStyleSheet("QPushButton { padding: 5px 8px; font-size: 11px; }")
+        self.mono_down_btn.clicked.connect(self._on_mono_move_down)
+        ctrl_layout.addWidget(self.mono_down_btn)
+
+        self.mono_del_btn = QPushButton("🗑️")
+        self.mono_del_btn.setToolTip("删除选中")
+        self.mono_del_btn.setStyleSheet("QPushButton { padding: 5px 8px; font-size: 11px; }")
+        self.mono_del_btn.clicked.connect(self._on_mono_delete)
+        ctrl_layout.addWidget(self.mono_del_btn)
+
+        self.mono_clear_btn = QPushButton("清空")
+        self.mono_clear_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #c0392b;
+                border: none;
+                padding: 5px 10px;
+                border-radius: 4px;
+                font-size: 11px;
+                color: white;
+            }
+            QPushButton:hover { background-color: #e74c3c; }
+        """)
+        self.mono_clear_btn.clicked.connect(self._clear_mono_files)
+        ctrl_layout.addWidget(self.mono_clear_btn)
+        mono_layout.addLayout(ctrl_layout)
+
+        self.mono_files_group = QGroupBox('📋 声道匹配 (双击声道可编辑)')
         self.mono_files_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self.mono_files_group.setStyleSheet("""
             QGroupBox {
@@ -928,11 +996,14 @@ class LoudnessMeterApp(QMainWindow):
         mono_files_layout.setSpacing(4)
         mono_files_layout.setContentsMargins(10, 10, 10, 10)
 
-        self.mono_files_table = QTableWidget(0, 2)
-        self.mono_files_table.setHorizontalHeaderLabels(['声道', '文件名'])
+        self.mono_files_table = QTableWidget(0, 3)
+        self.mono_files_table.setHorizontalHeaderLabels(['#', '声道', '文件名'])
         self.mono_files_table.verticalHeader().setVisible(False)
         self.mono_files_table.horizontalHeader().setStretchLastSection(True)
         self.mono_files_table.setMinimumHeight(180)
+        self.mono_files_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.mono_files_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.mono_files_table.setEditTriggers(QAbstractItemView.DoubleClicked)
         self.mono_files_table.setStyleSheet("""
             QTableWidget {
                 background-color: #16213e;
@@ -949,8 +1020,31 @@ class LoudnessMeterApp(QMainWindow):
                 padding: 2px;
                 color: #eee;
             }
+            QTableWidget::item:selected {
+                background-color: #1a4a7a;
+            }
         """)
-        self.mono_files_table.setColumnWidth(0, 55)
+        self.mono_files_table.setColumnWidth(0, 30)
+        self.mono_files_table.setColumnWidth(1, 60)
+        # 声道列使用 QComboBox 代理
+        class ChannelComboDelegate(QStyledItemDelegate):
+            def __init__(self, parent=None):
+                super().__init__(parent)
+                self.channels = ['L', 'R', 'C', 'LFE', 'Ls', 'Rs', 'Lss', 'Rss',
+                                 'Lrs', 'Rrs', 'Ltf', 'Rtf', 'Ltr', 'Rtr', 'Ltb', 'Rtb', '?']
+            def createEditor(self, parent, option, index):
+                editor = QComboBox(parent)
+                editor.addItems(self.channels)
+                return editor
+            def setEditorData(self, editor, index):
+                text = index.model().data(index, Qt.EditRole)
+                idx = editor.findText(text)
+                if idx >= 0:
+                    editor.setCurrentIndex(idx)
+            def setModelData(self, editor, model, index):
+                model.setData(index, editor.currentText(), Qt.EditRole)
+        self.mono_files_table.setItemDelegateForColumn(1, ChannelComboDelegate(self))
+        self.mono_files_table.itemChanged.connect(self._on_mono_item_changed)
         mono_files_layout.addWidget(self.mono_files_table, 1)
 
         mono_layout.addWidget(self.mono_files_group, 1)
@@ -988,6 +1082,81 @@ class LoudnessMeterApp(QMainWindow):
         self.mono_section.setVisible(mode == 'mono')
         if hasattr(self, 'file_info_group'):
             self.file_info_group.setVisible(mode != 'mono')
+
+    # ---------- 多单声道控制方法 ----------
+
+    def _on_mono_auto_match(self):
+        """对当前已加载的文件重新执行自动匹配"""
+        if not self.mono_files:
+            QMessageBox.information(self, "提示", "请先选择文件")
+            return
+        template_map = {
+            "Stereo (2.0)": "Stereo (2.0)",
+            "5.1 (6ch)": "5.1 (6ch)",
+            "7.1 (8ch)": "7.1 (8ch)",
+            "7.1.2 (10ch)": "7.1.2 (10ch)",
+            "5.1.4 (10ch)": "5.1.4 (10ch)",
+            "7.1.4 (12ch)": "7.1.4 (12ch)",
+        }
+        combo_text = self.mono_template_combo.currentText()
+        template_name = template_map.get(combo_text, None)
+        file_paths = [p for p, _ in self.mono_files]
+        self.mono_files = auto_match_mono_files(file_paths, template_name=template_name)
+        self._update_mono_files_list()
+
+    def _on_mono_move_up(self):
+        row = self.mono_files_table.currentRow()
+        if row <= 0:
+            return
+        self.mono_files[row], self.mono_files[row - 1] = self.mono_files[row - 1], self.mono_files[row]
+        self._update_mono_files_list()
+        self.mono_files_table.selectRow(row - 1)
+
+    def _on_mono_move_down(self):
+        row = self.mono_files_table.currentRow()
+        if row < 0 or row >= len(self.mono_files) - 1:
+            return
+        self.mono_files[row], self.mono_files[row + 1] = self.mono_files[row + 1], self.mono_files[row]
+        self._update_mono_files_list()
+        self.mono_files_table.selectRow(row + 1)
+
+    def _on_mono_delete(self):
+        row = self.mono_files_table.currentRow()
+        if row < 0 or row >= len(self.mono_files):
+            return
+        del self.mono_files[row]
+        self._update_mono_files_list()
+        if self.mono_files and row < len(self.mono_files):
+            self.mono_files_table.selectRow(row)
+        elif self.mono_files:
+            self.mono_files_table.selectRow(len(self.mono_files) - 1)
+
+    def _on_mono_item_changed(self, item):
+        """表格编辑完成后同步到 self.mono_files"""
+        if item.column() != 1:
+            return
+        row = item.row()
+        if row < 0 or row >= len(self.mono_files):
+            return
+        new_ch = item.text()
+        path, _ = self.mono_files[row]
+        self.mono_files[row] = (path, new_ch)
+        # 更新颜色
+        if new_ch == '?':
+            item.setForeground(QColor('#e74c3c'))
+        else:
+            item.setForeground(QColor('#27ae60'))
+        matched = sum(1 for _, ch in self.mono_files if ch != '?')
+        self.mono_files_group.setTitle(f'📋 声道匹配 ({matched}/{len(self.mono_files)} 已匹配)')
+
+
+    def _clear_mono_files(self):
+        """清空多单声道文件列表"""
+        self.mono_files = []
+        self._update_mono_files_list()
+        self.filename_label.setText("未选择文件")
+        self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #667eea;")
+        self.path_label.setText("")
 
     def _clear_file_metadata(self):
         """清空文件元数据显示"""
@@ -1403,22 +1572,57 @@ class LoudnessMeterApp(QMainWindow):
                 # 立即解析ADM并显示信息
                 self.parse_and_display_adm(path)
 
-        elif mode == 'mono':  # 多单声道
-            dlg = SmartMultiMonoDialog(self)
-            if dlg.exec() == QDialog.Accepted:
-                self.mono_files = dlg.get_files()
-                if self.mono_files:
-                    p = Path(self.mono_files[0][0])
-                    self.filename_label.setText(f"✓ {len(self.mono_files)}个单声道文件")
-                    self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #27ae60;")
-                    self.path_label.setText(str(p.parent))
+        elif mode == 'mono':  # 多单声道 — 直接选择文件 + 自动匹配
+            files, _ = QFileDialog.getOpenFileNames(
+                self, "选择单声道WAV文件", "", "WAV文件 (*.wav)"
+            )
+            if not files:
+                return
 
-                    cfg_map = {2: 'stereo', 6: '5.1', 8: '7.1', 10: '5.1.4', 12: '7.1.4'}
-                    if len(self.mono_files) in cfg_map:
-                        self.config_combo.setCurrentText(cfg_map[len(self.mono_files)])
+            # 过滤非单声道
+            valid_files = []
+            skipped = []
+            for path in files:
+                try:
+                    info = sf.info(path)
+                    if info.channels == 1:
+                        valid_files.append(path)
+                    else:
+                        skipped.append(f"{Path(path).name} ({info.channels}ch)")
+                except Exception as e:
+                    skipped.append(f"{Path(path).name}: {e}")
 
-                    # 更新文件列表显示
-                    self._update_mono_files_list()
+            if skipped:
+                QMessageBox.information(self, "跳过文件", "以下文件不是单声道或无法读取:\n" + "\n".join(skipped[:10]))
+
+            if not valid_files:
+                return
+
+            # 自动匹配
+            template_map = {
+                "Stereo (2.0)": "Stereo (2.0)",
+                "5.1 (6ch)": "5.1 (6ch)",
+                "7.1 (8ch)": "7.1 (8ch)",
+                "7.1.2 (10ch)": "7.1.2 (10ch)",
+                "5.1.4 (10ch)": "5.1.4 (10ch)",
+                "7.1.4 (12ch)": "7.1.4 (12ch)",
+            }
+            combo_text = self.mono_template_combo.currentText()
+            template_name = template_map.get(combo_text, None)
+            self.mono_files = auto_match_mono_files(valid_files, template_name=template_name)
+
+            if self.mono_files:
+                p = Path(self.mono_files[0][0])
+                self.filename_label.setText(f"✓ {len(self.mono_files)}个单声道文件")
+                self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #27ae60;")
+                self.path_label.setText(str(p.parent))
+
+                cfg_map = {2: 'stereo', 6: '5.1', 8: '7.1', 10: '5.1.4', 12: '7.1.4'}
+                matched_count = sum(1 for _, ch in self.mono_files if ch != '?')
+                if matched_count in cfg_map:
+                    self.config_combo.setCurrentText(cfg_map[matched_count])
+
+                self._update_mono_files_list()
 
 
     
