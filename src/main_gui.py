@@ -802,8 +802,6 @@ class LoudnessMeterApp(QMainWindow):
             meta_layout.addWidget(lbl_val, row, col * 2 + 1)
         file_layout.addWidget(meta_widget)
 
-        layout.addWidget(self.file_info_group)
-
         # === 浏览按钮（永久显示） ===
         browse_btn = QPushButton("浏览...")
         browse_btn.setStyleSheet("""
@@ -819,6 +817,8 @@ class LoudnessMeterApp(QMainWindow):
         """)
         browse_btn.clicked.connect(self.browse)
         layout.addWidget(browse_btn)
+
+        layout.addWidget(self.file_info_group)
 
         # === 3. 模式专属区域 ===
         # -- 标准多声道 --
