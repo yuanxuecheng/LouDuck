@@ -542,6 +542,16 @@ class ADM:
                 ch_name = ch_fmt.get('audioChannelFormatName', '')
                 
                 ch_type = ch_fmt.get('typeDefinition', '') or ch_fmt.get('typeLabel', 'DirectSpeakers')
+                # 如果 typeLabel 是数字代码，映射为类型名称
+                TYPE_LABEL_MAP = {
+                    '0001': 'DirectSpeakers',
+                    '0002': 'Matrix',
+                    '0003': 'Objects',
+                    '0004': 'HOA',
+                    '0005': 'Binaural',
+                }
+                if ch_type in TYPE_LABEL_MAP:
+                    ch_type = TYPE_LABEL_MAP[ch_type]
                 
                 position = None
                 speaker_label = None
@@ -562,6 +572,25 @@ class ADM:
                         'elevation': float(pos_block.get('elevation', 0) or 0),
                         'distance': float(pos_block.get('distance', 1.0) or 1.0)
                     }
+                    # 支持笛卡尔坐标子元素格式 <position coordinate="X/Y/Z">
+                    cartesian_positions = {}
+                    for pos_el in self._findall(pos_block, 'adm:position'):
+                        coord = pos_el.get('coordinate', '')
+                        if coord and pos_el.text:
+                            try:
+                                cartesian_positions[coord.upper()] = float(pos_el.text)
+                            except ValueError:
+                                pass
+                    if cartesian_positions:
+                        position['cartesian'] = cartesian_positions
+                        # 检测 cartesian 标志
+                        cart_el = self._find(pos_block, 'adm:cartesian')
+                        if cart_el is not None and cart_el.text:
+                            position['is_cartesian'] = cart_el.text.strip() in ('1', 'true', 'True')
+                    # 支持 <speakerLabel> 在 audioBlockFormat 内（RoomCentric 风格）
+                    spk_in_block = self._find(pos_block, 'adm:speakerLabel')
+                    if spk_in_block is not None and spk_in_block.text:
+                        speaker_label = spk_in_block.text
                 
                 is_lfe = False
                 if speaker_label and 'LFE' in speaker_label.upper():

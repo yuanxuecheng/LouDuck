@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-ImmersiveLoudness 构建脚本 v3
+ImmersiveLoudness 构建脚本 v3.1
+更新：支持 EAR 渲染器、mono_channel_matcher、renderers 模块
 修复：scipy/numpy 依赖 unittest 的问题
 """
 
@@ -55,20 +56,29 @@ def find_icon():
 
 def check_dependencies():
     """检查并安装必要的依赖"""
-    required = ['pyinstaller', 'PySide6', 'soundfile', 'numpy', 'scipy', 'openpyxl']
+    # pip 包名 -> Python 模块名 映射
+    required = {
+        'pyinstaller': 'PyInstaller',
+        'PySide6': 'PySide6',
+        'soundfile': 'soundfile',
+        'numpy': 'numpy',
+        'scipy': 'scipy',
+        'openpyxl': 'openpyxl',
+        'ebu-adm-renderer': 'ear',
+    }
     
     print("=" * 60)
     print("检查依赖...")
     print("=" * 60)
     
-    for pkg in required:
+    for pip_pkg, module_name in required.items():
         try:
-            __import__(pkg.lower().replace('pyinstaller', 'PyInstaller'))
-            print(f"  ✓ {pkg}")
+            __import__(module_name)
+            print(f"  ✓ {pip_pkg}")
         except ImportError:
-            print(f"  ✗ {pkg} - 正在安装...")
-            subprocess.check_call([sys.executable, '-m', 'pip', 'install', pkg])
-            print(f"  ✓ {pkg} 安装完成")
+            print(f"  ✗ {pip_pkg} - 正在安装...")
+            subprocess.check_call([sys.executable, '-m', 'pip', 'install', pip_pkg])
+            print(f"  ✓ {pip_pkg} 安装完成")
     
     ensure_pillow()
     print()
@@ -81,9 +91,23 @@ def create_spec_file(project_dir, src_dir, icon_path, output_dir):
     itu1770 = str(src_dir / 'itu1770_meter.py').replace('\\', '/')
     report_exporter = str(src_dir / 'report_exporter.py').replace('\\', '/')
     mono_matcher = str(src_dir / 'mono_channel_matcher.py').replace('\\', '/')
+    renderers_dir = str(src_dir / 'renderers').replace('\\', '/')
     main_script = str(src_dir / 'main_gui.py').replace('\\', '/')
+    hooks_dir = str(project_dir / 'pyinstaller_hooks').replace('\\', '/')
+    assets_dir = str(project_dir / 'assets').replace('\\', '/')
     
     icon_str = f"icon='{icon_path.replace(chr(92), '/')}'," if icon_path else ""
+    
+    # EAR 数据文件路径
+    try:
+        import ear
+        ear_pkg_dir = Path(ear.__file__).parent
+        ear_core_data = str(ear_pkg_dir / 'core' / 'data').replace('\\', '/')
+        ear_adm_data = str(ear_pkg_dir / 'fileio' / 'adm' / 'data').replace('\\', '/')
+        ear_datas = f"""('{ear_core_data}', 'ear/core/data'),
+        ('{ear_adm_data}', 'ear/fileio/adm/data'),"""
+    except Exception:
+        ear_datas = ""
     
     # 关键修复：包含 unittest（scipy/numpy 需要）
     spec_content = f'''# -*- mode: python ; coding: utf-8 -*-
@@ -93,13 +117,16 @@ sys.setrecursionlimit(5000)
 
 a = Analysis(
     ['{main_script}'],
-    pathex=['{str(project_dir).replace(chr(92), '/')}'],
+    pathex=['{str(project_dir).replace(chr(92), '/')}', '{str(src_dir).replace(chr(92), '/')}'],
     binaries=[],
     datas=[
         ('{adm_parser}', '.'),
         ('{itu1770}', '.'),
         ('{report_exporter}', '.'),
         ('{mono_matcher}', '.'),
+        ('{renderers_dir}', 'renderers'),
+        ('{assets_dir}', 'assets'),
+        {ear_datas}
     ],
     hiddenimports=[
         # PySide6
@@ -122,13 +149,29 @@ a = Analysis(
         'openpyxl',
         'openpyxl.styles',
         'openpyxl.utils',
+        # renderers / EAR
+        'renderers',
+        'renderers.ear_renderer',
+        'ear.cmdline.render_file',
+        'ear.core.bs2051',
+        'ear.core.allocentric',
+        'ear.core.hoa',
+        'ear.core.direct_speakers',
+        'ear.core.objectbased',
+        'ear.core.metadata_input',
+        'ear.fileio',
+        'ear.fileio.bw64',
+        'ear.fileio.adm',
+        'ear.fileio.adm.xml',
         # 其他
         'dataclasses',
         'xml.etree.ElementTree',
         'pathlib',
         'typing',
+        're',
+        'struct',
     ],
-    hookspath=[],
+    hookspath=['{hooks_dir}'],
     hooksconfig={{}},
     runtime_hooks=[],
     excludes=[

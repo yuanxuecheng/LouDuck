@@ -1,5 +1,5 @@
 """
-ITU-R BS.1770-5 响度测量仪 v3.1 (整合修复版)
+ITU-R BS.1770-5 响度测量仪 v3.2 (整合修复版)
 修复：
 - 测量算法（process_audio 变量定义、最大值追踪）
 - 智能声道匹配（支持点号分隔的声道标识）
@@ -65,6 +65,7 @@ LOUDNESS_STANDARDS = {
 }
 
 
+from renderers.ear_renderer import render_adm, get_supported_layouts, get_adm_info
 from mono_channel_matcher import (
     SmartMultiMonoDialog,
     CHANNEL_TEMPLATES,
@@ -556,9 +557,15 @@ class LoudnessMeterApp(QMainWindow):
                 lines.append(f"  ... 还有 {len(direct_speakers)-16} 个声道")
             
             # 检测Objects
-            if objects_ch:
+            has_objects = bool(objects_ch)
+            if has_objects:
                 lines.append("")
                 lines.append(f"⚠️ 包含 {len(objects_ch)} 个动态对象(Object)")
+                self.atmos_render_group.setVisible(True)
+                self.atmos_render_label.setText(f"检测到 {len(objects_ch)} 个动态对象，可选择渲染到目标声道布局后，点击“渲染并测量”测量响度。")
+                self.atmos_render_label.setText(f"注意：点击中间面板“开始测量”将仅测量声道响度，不包含对象。")
+            else:
+                self.atmos_render_group.setVisible(False)
             
             # 配置识别 - 兼容新旧版adm_parser
             ch_count = len(direct_speakers)
@@ -900,6 +907,63 @@ class LoudnessMeterApp(QMainWindow):
         renderer_layout.addWidget(self.ref_layout_label)
 
         adm_layout.addWidget(self.renderer_group)
+
+        # Dolby Atmos / Audio Vivid 渲染选项
+        self.atmos_render_group = QGroupBox("🎧 沉浸式音频渲染")
+        self.atmos_render_group.setVisible(False)
+        self.atmos_render_group.setStyleSheet("""
+            QGroupBox {
+                border: 1px solid #9b59b6;
+                border-radius: 6px;
+                margin-top: 6px;
+                padding-top: 6px;
+                font-weight: bold;
+                font-size: 11px;
+            }
+            QGroupBox::title { color: #9b59b6; }
+        """)
+        atmos_render_layout = QVBoxLayout(self.atmos_render_group)
+        atmos_render_layout.setSpacing(6)
+        atmos_render_layout.setContentsMargins(10, 10, 10, 10)
+
+        self.atmos_render_label = QLabel("检测到动态对象音频，可选择渲染到目标声道布局后测量响度。")
+        self.atmos_render_label.setStyleSheet("color: #bbb; font-size: 10px;")
+        self.atmos_render_label.setWordWrap(True)
+        atmos_render_layout.addWidget(self.atmos_render_label)
+
+        atmos_ctrl_layout = QHBoxLayout()
+        atmos_ctrl_layout.addWidget(QLabel("目标布局:"))
+        self.atmos_layout_combo = QComboBox()
+        self.atmos_layout_combo.addItems(get_supported_layouts())
+        self.atmos_layout_combo.setCurrentText("5.1.4 (10ch)")
+        self.atmos_layout_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #0f3460;
+                border: 1px solid #9b59b6;
+                padding: 4px;
+                font-size: 12px;
+                color: #eee;
+            }
+        """)
+        atmos_ctrl_layout.addWidget(self.atmos_layout_combo, 1)
+
+        self.atmos_render_btn = QPushButton("🎯 渲染并测量")
+        self.atmos_render_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #9b59b6;
+                border: none;
+                padding: 5px 10px;
+                border-radius: 4px;
+                font-size: 11px;
+                color: white;
+            }
+            QPushButton:hover { background-color: #8e44ad; }
+        """)
+        self.atmos_render_btn.clicked.connect(self._render_and_measure_adm)
+        atmos_ctrl_layout.addWidget(self.atmos_render_btn)
+        atmos_render_layout.addLayout(atmos_ctrl_layout)
+
+        adm_layout.addWidget(self.atmos_render_group)
         adm_layout.addStretch()
         layout.addWidget(self.adm_section)
 
@@ -1316,7 +1380,7 @@ class LoudnessMeterApp(QMainWindow):
         right_info.setSpacing(1)
         right_info.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         
-        version_label = QLabel('v3.1  (build 260427)')
+        version_label = QLabel('v3.2  (build 260429)')
         version_label.setStyleSheet('color: #667eea; font-size: 11px; font-weight: bold;')
         version_label.setAlignment(Qt.AlignRight)
         right_info.addWidget(version_label)
@@ -1527,6 +1591,55 @@ class LoudnessMeterApp(QMainWindow):
 
 
     
+    def _render_and_measure_adm(self):
+        """渲染 ADM 文件到目标布局，然后测量响度"""
+        if not self.current_file or not Path(self.current_file).exists():
+            QMessageBox.warning(self, "提示", "请先选择 ADM 文件")
+            return
+
+        target_layout = self.atmos_layout_combo.currentText()
+
+        try:
+            from renderers.ear_renderer import is_object_based_adm, render_adm
+
+            if not is_object_based_adm(self.current_file):
+                QMessageBox.information(self, "提示", "该文件不包含动态对象音频，无需渲染。")
+                return
+
+            # 显示进度
+            self.step_label.setText(f"正在渲染到 {target_layout}...")
+            self.step_label.setStyleSheet("color: #9b59b6; font-weight: bold;")
+            QApplication.processEvents()
+
+            # 渲染
+            output_path = render_adm(self.current_file, target_layout)
+
+            # 切换到标准模式，加载渲染后的文件
+            self.btn_standard.setChecked(True)
+            self.on_input_mode_changed('standard')
+            self.current_file = output_path
+            p = Path(output_path)
+            self.filename_label.setText(f"✓ 渲染: {p.name}")
+            self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #9b59b6;")
+            self.path_label.setText(str(p.parent))
+            self._update_file_metadata(output_path)
+
+            # 自动设置声道配置
+            cfg_map = {"Stereo (2.0)": "stereo", "5.1 (6ch)": "5.1", "7.1 (8ch)": "7.1",
+                       "5.1.4 (10ch)": "5.1.4", "7.1.4 (12ch)": "7.1.4", "9.1.6 (16ch)": "9.1.6"}
+            if target_layout in cfg_map:
+                self.config_combo.setCurrentText(cfg_map[target_layout])
+
+            # 自动开始测量
+            self.start_measure()
+
+        except Exception as e:
+            QMessageBox.critical(self, "渲染失败", f"渲染过程中出错:\n{str(e)}")
+            self.step_label.setText("渲染失败")
+            self.step_label.setStyleSheet("color: #e74c3c; font-weight: bold;")
+            import traceback
+            print(traceback.format_exc())
+
     def browse(self):
         """浏览文件"""
         # 确定当前模式
@@ -2150,13 +2263,20 @@ class LoudnessMeterApp(QMainWindow):
         print(f'[Excel导出] 已保存到: {path}')
 
 
+def _get_resource_path(relative_path):
+    """获取 PyInstaller 打包后的资源路径"""
+    if hasattr(sys, '_MEIPASS'):
+        return Path(sys._MEIPASS) / relative_path
+    return Path(__file__).parent.parent / relative_path
+
+
 def main():
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
-    icon_path = Path('assets/icon.ico')
+    icon_path = _get_resource_path('assets/icon.ico')
     if icon_path.exists():
         from PySide6.QtGui import QIcon
-        app.setWindowIcon(QIcon(str(icon_path.resolve())))
+        app.setWindowIcon(QIcon(str(icon_path)))
     win = LoudnessMeterApp()
     win.show()
     sys.exit(app.exec())
