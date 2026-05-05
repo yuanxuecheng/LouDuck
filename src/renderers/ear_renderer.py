@@ -37,9 +37,10 @@ _AUDIOSTREAM_RE = re.compile(
 
 def _fix_adm_xml(axml_data: bytes) -> bytes:
     """
-    修复 ADM XML：移除 audioStreamFormat 中同时存在的 audioPackFormatIDRef。
-    EAR 严格要求 audioStreamFormat 只能引用 audioChannelFormatIDRef 或
-    audioPackFormatIDRef 之一，但 Pro Tools 导出的 Atmos ADM 经常同时包含两者。
+    修复 ADM XML：
+    1. 移除 audioStreamFormat 中同时存在的 audioPackFormatIDRef。
+    2. 将 Room-Centric 风格的 LFE speakerLabel 映射为标准 ITU 标签 LFE1，
+       确保 EAR 正确识别并路由到目标布局的 LFE 声道。
     """
     xml_str = axml_data.decode('utf-8')
 
@@ -58,6 +59,14 @@ def _fix_adm_xml(axml_data: bytes) -> bytes:
         return open_tag + body + close_tag
 
     xml_str = _AUDIOSTREAM_RE.sub(_fix_stream_block, xml_str)
+
+    # 修复 Room-Centric LFE speakerLabel：RC_LFE / RoomCentricLFE 等 → LFE1
+    xml_str = re.sub(
+        r'(<speakerLabel>)(RC_LFE|RoomCentricLFE|LFE_RoomCentric)(</speakerLabel>)',
+        r'\1LFE1\3',
+        xml_str,
+    )
+
     return xml_str.encode('utf-8')
 
 
