@@ -211,7 +211,7 @@ def render_adm(
 
     if output_path is None:
         output_path = str(
-            Path(tempfile.gettempdir()) / f"rendered_{Path(input_path).stem}_{ear_system}.wav"
+            Path(tempfile.gettempdir()) / f"{Path(input_path).stem}_rndrd.wav"
         )
 
     driver = OfflineRenderDriver(

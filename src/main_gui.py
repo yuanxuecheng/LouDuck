@@ -12,6 +12,7 @@ import soundfile as sf
 import numpy as np
 import time
 import re
+from datetime import datetime
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, Optional, List, Tuple
@@ -540,7 +541,7 @@ class LoudnessMeterApp(QMainWindow):
             lines.append(f"🔊 声床配置 ({len(direct_speakers)} DirectSpeakers):")
             
             # 显示声床详情
-            for i, ch in enumerate(direct_speakers[:16]):
+            for i, ch in enumerate(direct_speakers):
                 pos_str = ""
                 if ch.position:
                     az = ch.position.get('azimuth', 0)
@@ -553,17 +554,16 @@ class LoudnessMeterApp(QMainWindow):
                 lfe_mark = " [LFE]" if ch.is_lfe else ""
                 lines.append(f"  Ch{i:2d}: {ch.name:20s} {pos_str}{lfe_mark}")
             
-            if len(direct_speakers) > 16:
-                lines.append(f"  ... 还有 {len(direct_speakers)-16} 个声道")
-            
             # 检测Objects
             has_objects = bool(objects_ch)
             if has_objects:
                 lines.append("")
                 lines.append(f"⚠️ 包含 {len(objects_ch)} 个动态对象(Object)")
                 self.atmos_render_group.setVisible(True)
-                self.atmos_render_label.setText(f"检测到 {len(objects_ch)} 个动态对象，可选择渲染到目标声道布局后，点击“渲染并测量”测量响度。")
-                self.atmos_render_label.setText(f"注意：点击中间面板“开始测量”将仅测量声道响度，不包含对象。")
+                self.atmos_render_label.setText(
+                    f"检测到 {len(objects_ch)} 个动态对象，可选择渲染到目标声道布局后，点击“渲染并测量”测量。\n"
+                    f"注意：点击中间面板“开始测量”将仅测量声道响度，不包含对象。"
+                )
             else:
                 self.atmos_render_group.setVisible(False)
             
@@ -600,13 +600,12 @@ class LoudnessMeterApp(QMainWindow):
                 if detected == 'unknown':
                     lines.append("   (特征识别失败，请手动确认)")
             
-            # 显示到UI
-            self.adm_info.setPlainText("\n".join(lines))
+            # 渲染器与创作软件信息（合并到 adm_info 中）
+            lines.append("")
+            lines.append("─" * 36)
+            lines.append("🎛️ 渲染器与创作软件信息")
+            lines.append("─" * 36)
             
-            # 更新渲染器与创作软件信息
-            self.renderer_group.setVisible(True)
-            
-            # 渲染器信息
             if adm.renderer_info:
                 r_info = adm.renderer_info
                 r_text = f"🎚️ {r_info.get('name', '未知渲染器')}"
@@ -616,37 +615,27 @@ class LoudnessMeterApp(QMainWindow):
                     r_text += f" [{r_info['coordinate_mode']}]"
                 if r_info.get('uri'):
                     r_text += f"\n   URI: {r_info['uri']}"
-                if r_info.get('pack_format_refs'):
-                    r_text += f"\n   布局: {', '.join(r_info['pack_format_refs'])}"
-                self.renderer_label.setText(r_text)
-                self.renderer_label.setStyleSheet("color: #f39c12; font-size: 11px;")
+                lines.append(r_text)
             else:
-                self.renderer_label.setText("🎚️ 未检测到渲染器信息")
-                self.renderer_label.setStyleSheet("color: #888; font-size: 11px;")
+                lines.append("🎚️ 未检测到渲染器信息")
             
-            # 创作软件信息
             if adm.authoring_info:
                 a_info = adm.authoring_info
-                a_text = ""
                 if a_info.get('authoring_tool'):
-                    a_text += f"🛠️ {a_info['authoring_tool']}"
+                    a_text = f"🛠️ {a_info['authoring_tool']}"
                     if a_info.get('authoring_tool_version'):
                         a_text += f" v{a_info['authoring_tool_version']}"
+                    lines.append(a_text)
                 else:
-                    a_text = "🛠️ 未检测到创作软件"
-                self.authoring_label.setText(a_text)
-                self.authoring_label.setStyleSheet("color: #3498db; font-size: 11px;")
+                    lines.append("🛠️ 未检测到创作软件")
                 
-                # 参考布局
                 if a_info.get('reference_layout'):
-                    self.ref_layout_label.setText(f"📐 参考布局: {a_info['reference_layout']}")
-                    self.ref_layout_label.setVisible(True)
-                else:
-                    self.ref_layout_label.setVisible(False)
+                    lines.append(f"📐 参考布局: {a_info['reference_layout']}")
             else:
-                self.authoring_label.setText("🛠️ 未检测到创作软件信息")
-                self.authoring_label.setStyleSheet("color: #888; font-size: 11px;")
-                self.ref_layout_label.setVisible(False)
+                lines.append("🛠️ 未检测到创作软件信息")
+            
+            # 显示到UI
+            self.adm_info.setPlainText("\n".join(lines))
             
             # 保存parser供后续使用
             self.current_adm_parser = parser
@@ -708,7 +697,7 @@ class LoudnessMeterApp(QMainWindow):
         self.mode_button_group.setExclusive(True)
 
         self.btn_mono = QPushButton("🎵 多单声道")
-        self.btn_standard = QPushButton("📁 标准多声道")
+        self.btn_standard = QPushButton("📁 单个多声道")
         self.btn_adm = QPushButton("📦 ADM/BW64")
 
         for btn in (self.btn_mono, self.btn_standard, self.btn_adm):
@@ -751,7 +740,7 @@ class LoudnessMeterApp(QMainWindow):
         self._update_mode_buttons('mono')
 
         # === 2. 文件信息卡片 ===
-        # === 2. 文件信息卡片（标准/ADM 模式显示） ===
+        # === 2. 文件信息卡片（单个多声道/ADM 模式显示） ===
         self.file_info_group = QGroupBox("文件信息")
         self.file_info_group.setStyleSheet("""
             QGroupBox {
@@ -828,7 +817,7 @@ class LoudnessMeterApp(QMainWindow):
         layout.addWidget(self.file_info_group)
 
         # === 3. 模式专属区域 ===
-        # -- 标准多声道 --
+        # -- 单个多声道 --
         self.standard_section = QWidget()
         standard_layout = QVBoxLayout(self.standard_section)
         standard_layout.setContentsMargins(0, 0, 0, 0)
@@ -858,25 +847,8 @@ class LoudnessMeterApp(QMainWindow):
         adm_layout.setContentsMargins(0, 0, 0, 0)
         adm_layout.setSpacing(8)
 
-        self.adm_info = QTextEdit()
-        self.adm_info.setReadOnly(True)
-        self.adm_info.setPlaceholderText("ADM文件信息将显示在这里...")
-        self.adm_info.setMaximumHeight(200)
-        self.adm_info.setStyleSheet("""
-            QTextEdit {
-                background-color: #16213e;
-                border: 1px solid #e74c3c;
-                color: #eee;
-                font-family: Consolas, Monaco, monospace;
-                font-size: 11px;
-                padding: 5px;
-            }
-        """)
-        adm_layout.addWidget(self.adm_info)
-
-        self.renderer_group = QGroupBox("🎛️ 渲染器与创作软件信息")
-        self.renderer_group.setVisible(False)
-        self.renderer_group.setStyleSheet("""
+        self.adm_info_group = QGroupBox("ADM 信息")
+        self.adm_info_group.setStyleSheet("""
             QGroupBox {
                 border: 1px solid #e74c3c;
                 border-radius: 6px;
@@ -887,30 +859,31 @@ class LoudnessMeterApp(QMainWindow):
             }
             QGroupBox::title { color: #e74c3c; }
         """)
-        renderer_layout = QVBoxLayout(self.renderer_group)
-        renderer_layout.setSpacing(6)
-        renderer_layout.setContentsMargins(10, 10, 10, 10)
+        adm_info_layout = QVBoxLayout(self.adm_info_group)
+        adm_info_layout.setContentsMargins(6, 2, 6, 6)
+        adm_info_layout.setSpacing(4)
 
-        self.renderer_label = QLabel("渲染器: 未检测")
-        self.renderer_label.setStyleSheet("color: #f39c12; font-size: 11px;")
-        self.renderer_label.setWordWrap(True)
-        renderer_layout.addWidget(self.renderer_label)
-
-        self.authoring_label = QLabel("创作软件: 未检测")
-        self.authoring_label.setStyleSheet("color: #3498db; font-size: 11px;")
-        self.authoring_label.setWordWrap(True)
-        renderer_layout.addWidget(self.authoring_label)
-
-        self.ref_layout_label = QLabel("参考布局: 未检测")
-        self.ref_layout_label.setStyleSheet("color: #9b59b6; font-size: 11px;")
-        self.ref_layout_label.setWordWrap(True)
-        renderer_layout.addWidget(self.ref_layout_label)
-
-        adm_layout.addWidget(self.renderer_group)
+        self.adm_info = QTextEdit()
+        self.adm_info.setReadOnly(True)
+        self.adm_info.setPlaceholderText("ADM文件信息将显示在这里...")
+        self.adm_info.setMaximumHeight(160)
+        self.adm_info.setStyleSheet("""
+            QTextEdit {
+                background-color: #16213e;
+                border: none;
+                color: #eee;
+                font-family: Consolas, Monaco, monospace;
+                font-size: 11px;
+                padding: 4px;
+            }
+        """)
+        adm_info_layout.addWidget(self.adm_info)
+        adm_layout.addWidget(self.adm_info_group)
 
         # Dolby Atmos / Audio Vivid 渲染选项
         self.atmos_render_group = QGroupBox("🎧 沉浸式音频渲染")
         self.atmos_render_group.setVisible(False)
+        self.atmos_render_group.setMinimumHeight(160)
         self.atmos_render_group.setStyleSheet("""
             QGroupBox {
                 border: 1px solid #9b59b6;
@@ -926,7 +899,7 @@ class LoudnessMeterApp(QMainWindow):
         atmos_render_layout.setSpacing(6)
         atmos_render_layout.setContentsMargins(10, 10, 10, 10)
 
-        self.atmos_render_label = QLabel("检测到动态对象音频，可选择渲染到目标声道布局后测量响度。")
+        self.atmos_render_label = QLabel("检测到动态对象音频，可选择渲染到目标声道布局后测量响度。\n注意：点击中间面板“开始测量”将仅测量声道响度，不包含对象。")
         self.atmos_render_label.setStyleSheet("color: #bbb; font-size: 10px;")
         self.atmos_render_label.setWordWrap(True)
         atmos_render_layout.addWidget(self.atmos_render_label)
@@ -1571,7 +1544,7 @@ class LoudnessMeterApp(QMainWindow):
         self.mono_files = None
         self.current_adm_parser = None
 
-        # 文件信息框：仅标准/ADM模式显示
+        # 文件信息框：仅单个多声道/ADM模式显示
         if hasattr(self, 'file_info_group'):
             self.file_info_group.setVisible(mode != 'mono')
         if hasattr(self, 'filename_label'):
@@ -1584,8 +1557,8 @@ class LoudnessMeterApp(QMainWindow):
         if hasattr(self, 'adm_info'):
             self.adm_info.clear()
             self.adm_info.setPlaceholderText("ADM文件信息将显示在这里...")
-        if hasattr(self, 'renderer_group'):
-            self.renderer_group.setVisible(False)
+        if hasattr(self, 'atmos_render_group'):
+            self.atmos_render_group.setVisible(False)
         if hasattr(self, 'mono_files_group'):
             self.mono_files_group.setVisible(False)
 
@@ -1614,7 +1587,7 @@ class LoudnessMeterApp(QMainWindow):
             # 渲染
             output_path = render_adm(self.current_file, target_layout)
 
-            # 切换到标准模式，加载渲染后的文件
+            # 切换到单个多声道模式，加载渲染后的文件
             self.btn_standard.setChecked(True)
             self.on_input_mode_changed('standard')
             self.current_file = output_path
@@ -1653,7 +1626,7 @@ class LoudnessMeterApp(QMainWindow):
             QMessageBox.warning(self, "提示", "请先选择输入方式")
             return
         
-        if mode == 'standard':  # 标准文件
+        if mode == 'standard':  # 单个多声道文件
             path, _ = QFileDialog.getOpenFileName(
                 self, "选择音频", "", "音频 (*.wav *.flac *.mp3 *.ogg)"
             )
@@ -1873,12 +1846,6 @@ class LoudnessMeterApp(QMainWindow):
             info['file_name'] = Path(self.current_file).name
             if hasattr(self, 'adm_info'):
                 info['adm_info'] = self.adm_info.toPlainText()
-            if hasattr(self, 'renderer_label'):
-                info['renderer_info'] = self.renderer_label.text()
-            if hasattr(self, 'authoring_label'):
-                info['authoring_info'] = self.authoring_label.text()
-            if hasattr(self, 'ref_layout_label'):
-                info['ref_layout'] = self.ref_layout_label.text()
                 
         elif self.btn_mono.isChecked() and self.mono_files:
             info['mode'] = 'mono'
@@ -1918,11 +1885,14 @@ class LoudnessMeterApp(QMainWindow):
         if not self.current_results:
             return
         
-        std_name = self.current_standard.name.replace(' ', '_')[:15]
+        # 清理标准名中的 Windows 非法字符
+        std_name = self.current_standard.name.replace(' ', '_').replace('/', '_').replace('\\', '_')[:15]
         ext_map = {'txt': 'txt', 'json': 'json', 'excel': 'xlsx'}
         ext = ext_map.get(fmt, fmt)
         base = self._get_export_base_name()
-        default = f"{base}_{std_name}.{ext}"
+        now = datetime.now()
+        timestamp = f"{now:%y%m%d}_{now:%H}H{now:%M}"
+        default_name = f"{base}_{timestamp}_{std_name}.{ext}"
         
         filter_map = {
             'txt': "文本文件 (*.txt)",
@@ -1930,7 +1900,17 @@ class LoudnessMeterApp(QMainWindow):
             'excel': "Excel文件 (*.xlsx)"
         }
         filter_str = filter_map.get(fmt, f"*.{ext}")
-        path, _ = QFileDialog.getSaveFileName(self, "导出", default, filter_str)
+        
+        # 使用 QFileDialog 类确保默认文件名在 Windows 原生对话框中正确显示
+        dialog = QFileDialog(self, "导出")
+        dialog.setAcceptMode(QFileDialog.AcceptSave)
+        dialog.setNameFilter(filter_str)
+        dialog.selectFile(default_name)
+        if self.current_file:
+            dialog.setDirectory(str(Path(self.current_file).parent))
+        if dialog.exec() != QFileDialog.Accepted:
+            return
+        path = dialog.selectedFiles()[0]
         if not path:
             return
         
