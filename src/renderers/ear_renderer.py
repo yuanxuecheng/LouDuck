@@ -12,9 +12,11 @@ import tempfile
 from pathlib import Path
 from typing import Optional, List
 
-from ear.cmdline.render_file import OfflineRenderDriver
+from ear.cmdline.render_file import OfflineRenderDriver, PeakMonitor
 from ear.core.bs2051 import layout_names, get_layout
-from ear.fileio import openBw64
+from ear.fileio import openBw64, openBw64Adm
+from ear.fileio.bw64.chunks import FormatInfoChunk
+from ear.fileio.adm import timing_fixes
 
 
 # 友好名称 -> EAR 系统名称 (ITU-R BS.2051)
@@ -241,6 +243,111 @@ def render_adm(
             fixed_path = _create_fixed_bw64(input_path)
             try:
                 driver.run(fixed_path, output_path)
+                return output_path
+            finally:
+                try:
+                    import os
+                    os.remove(fixed_path)
+                except Exception:
+                    pass
+        else:
+            raise
+
+
+def render_adm_with_progress(
+    input_path: str,
+    target_layout: str,
+    output_path: Optional[str] = None,
+    progress_callback=None,
+) -> str:
+    """
+    渲染 ADM 文件到指定声道布局，支持进度回调。
+
+    Args:
+        input_path: ADM/BW64 文件路径
+        target_layout: 友好名称，如 "5.1.4 (10ch)"
+        output_path: 输出 WAV 路径，None 则创建临时文件
+        progress_callback: 进度回调函数，接收 0-100 的整数
+
+    Returns:
+        输出 WAV 文件路径
+
+    Raises:
+        ValueError: 不支持的目标布局
+        Exception: 渲染过程中出错
+    """
+    import soundfile as sf
+
+    ear_system = LAYOUT_MAP.get(target_layout)
+    if not ear_system:
+        raise ValueError(
+            f"不支持的目标布局: {target_layout}。支持: {list(LAYOUT_MAP.keys())}"
+        )
+
+    if output_path is None:
+        output_path = str(
+            Path(tempfile.gettempdir()) / f"{Path(input_path).stem}_rndrd.wav"
+        )
+
+    driver = OfflineRenderDriver(
+        target_layout=ear_system,
+        speakers_file=None,
+        output_gain_db=0,
+        fail_on_overload=False,
+        enable_block_duration_fix=True,
+    )
+
+    def _do_render(src_path: str, dst_path: str, total_samples: int) -> None:
+        spkr_layout, upmix, n_channels = driver.load_output_layout()
+        output_monitor = PeakMonitor(n_channels)
+
+        with openBw64Adm(src_path) as infile:
+            infile.adm.validate()
+            timing_fixes.check_blockFormat_timings(
+                infile.adm, fix=driver.enable_block_duration_fix
+            )
+
+            samples_written = 0
+            last_percent = -1
+
+            format_info = FormatInfoChunk(
+                formatTag=1,
+                channelCount=n_channels,
+                sampleRate=infile.sampleRate,
+                bitsPerSample=infile.bitdepth,
+            )
+            with openBw64(dst_path, "w", formatInfo=format_info) as outfile:
+                for output_block in driver.render_input_file(
+                    infile, spkr_layout, upmix
+                ):
+                    output_monitor.process(output_block)
+                    outfile.write(output_block)
+
+                    if progress_callback and total_samples > 0:
+                        samples_written += output_block.shape[0]
+                        percent = min(100, int(samples_written / total_samples * 100))
+                        if percent != last_percent:
+                            progress_callback(percent)
+                            last_percent = percent
+
+        output_monitor.warn_overloaded()
+        if driver.fail_on_overload and output_monitor.has_overloaded():
+            raise RuntimeError("输出过载：渲染后的音频出现了削波，请降低增益或检查输入电平。")
+
+    # 用 soundfile 预先获取总样本数（Bw64AdmReader 没有 duration 属性）
+    info = sf.info(input_path)
+    total_samples = info.frames
+
+    # 策略 B：先尝试原始文件；若因 audioStreamFormat 双重引用失败，自动修复并重试
+    try:
+        _do_render(input_path, output_path, total_samples)
+        return output_path
+    except Exception as first_err:
+        err_msg = str(first_err)
+        if "has a reference to both" in err_msg:
+            fixed_path = _create_fixed_bw64(input_path)
+            try:
+                _do_render(fixed_path, output_path, total_samples)
                 return output_path
             finally:
                 try:

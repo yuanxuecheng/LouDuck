@@ -427,6 +427,47 @@ class DetailedMeasurementWorker(QThread):
         return audio, sr
 
 
+class ADMRenderWorker(QThread):
+    """ADM 渲染后台线程，带进度反馈"""
+    progress = Signal(int)
+    finished_signal = Signal(str)
+    error = Signal(str)
+    
+    def __init__(self, input_path: str, target_layout: str):
+        super().__init__()
+        self.input_path = input_path
+        self.target_layout = target_layout
+        self._cancelled = False
+    
+    def run(self):
+        try:
+            import sys
+            from pathlib import Path
+            src_dir = str(Path(__file__).parent)
+            if src_dir not in sys.path:
+                sys.path.insert(0, src_dir)
+            from renderers.ear_renderer import render_adm_with_progress
+            
+            def on_progress(percent: int):
+                if not self._cancelled:
+                    self.progress.emit(percent)
+            
+            output_path = render_adm_with_progress(
+                self.input_path,
+                self.target_layout,
+                progress_callback=on_progress,
+            )
+            self.finished_signal.emit(output_path)
+        except Exception as e:
+            import traceback
+            err_detail = traceback.format_exc()
+            print(f"[ADM渲染错误] {err_detail}")
+            self.error.emit(str(e))
+    
+    def cancel(self):
+        self._cancelled = True
+
+
 class LoudnessMeterApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1353,7 +1394,7 @@ class LoudnessMeterApp(QMainWindow):
         right_info.setSpacing(1)
         right_info.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         
-        version_label = QLabel('v3.2  (build 260429)')
+        version_label = QLabel('v3.3  (build 260507)')
         version_label.setStyleSheet('color: #667eea; font-size: 11px; font-weight: bold;')
         version_label.setAlignment(Qt.AlignRight)
         right_info.addWidget(version_label)
@@ -1385,6 +1426,29 @@ class LoudnessMeterApp(QMainWindow):
         content_layout.addWidget(self.std_info)
         
         content_layout.addSpacing(10)
+        
+        # 渲染进度（ADM 渲染专用，与测量进度独立）
+        self.render_step_label = QLabel('')
+        self.render_step_label.setStyleSheet('color: #9b59b6; font-weight: bold;')
+        self.render_step_label.setVisible(False)
+        content_layout.addWidget(self.render_step_label)
+        
+        self.render_progress = QProgressBar()
+        self.render_progress.setVisible(False)
+        self.render_progress.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #9b59b6;
+                border-radius: 4px;
+                text-align: center;
+                color: white;
+            }
+            QProgressBar::chunk {
+                background-color: #9b59b6;
+                border-radius: 4px;
+            }
+        """)
+        content_layout.addWidget(self.render_progress)
+        
         content_layout.addWidget(QLabel('当前步骤:'))
         self.step_label = QLabel('等待开始')
         self.step_label.setStyleSheet('color: #667eea; font-weight: bold;')
@@ -1565,53 +1629,71 @@ class LoudnessMeterApp(QMainWindow):
 
     
     def _render_and_measure_adm(self):
-        """渲染 ADM 文件到目标布局，然后测量响度"""
+        """渲染 ADM 文件到目标布局，然后测量响度（后台线程带进度条）"""
         if not self.current_file or not Path(self.current_file).exists():
             QMessageBox.warning(self, "提示", "请先选择 ADM 文件")
             return
 
         target_layout = self.atmos_layout_combo.currentText()
 
-        try:
-            from renderers.ear_renderer import is_object_based_adm, render_adm
+        from renderers.ear_renderer import is_object_based_adm
 
-            if not is_object_based_adm(self.current_file):
-                QMessageBox.information(self, "提示", "该文件不包含动态对象音频，无需渲染。")
-                return
+        if not is_object_based_adm(self.current_file):
+            QMessageBox.information(self, "提示", "该文件不包含动态对象音频，无需渲染。")
+            return
 
-            # 显示进度
-            self.step_label.setText(f"正在渲染到 {target_layout}...")
-            self.step_label.setStyleSheet("color: #9b59b6; font-weight: bold;")
-            QApplication.processEvents()
+        # 禁用渲染按钮防止重复点击
+        self.atmos_render_btn.setEnabled(False)
 
-            # 渲染
-            output_path = render_adm(self.current_file, target_layout)
+        # 显示渲染进度条
+        self.render_step_label.setText(f"🎧 正在渲染到 {target_layout}...")
+        self.render_step_label.setVisible(True)
+        self.render_progress.setValue(0)
+        self.render_progress.setVisible(True)
 
-            # 切换到单个多声道模式，加载渲染后的文件
-            self.btn_standard.setChecked(True)
-            self.on_input_mode_changed('standard')
-            self.current_file = output_path
-            p = Path(output_path)
-            self.filename_label.setText(f"✓ 渲染: {p.name}")
-            self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #9b59b6;")
-            self.path_label.setText(str(p.parent))
-            self._update_file_metadata(output_path)
+        # 启动后台渲染线程
+        self._render_worker = ADMRenderWorker(self.current_file, target_layout)
+        self._render_worker.progress.connect(self._on_render_progress)
+        self._render_worker.finished_signal.connect(self._on_render_finished)
+        self._render_worker.error.connect(self._on_render_error)
+        self._render_worker.start()
 
-            # 自动设置声道配置
-            cfg_map = {"Stereo (2.0)": "stereo", "5.1 (6ch)": "5.1", "7.1 (8ch)": "7.1",
-                       "5.1.4 (10ch)": "5.1.4", "7.1.4 (12ch)": "7.1.4", "9.1.6 (16ch)": "9.1.6"}
-            if target_layout in cfg_map:
-                self.config_combo.setCurrentText(cfg_map[target_layout])
+    def _on_render_progress(self, percent: int):
+        """更新渲染进度条"""
+        self.render_progress.setValue(percent)
 
-            # 自动开始测量
-            self.start_measure()
+    def _on_render_finished(self, output_path: str):
+        """渲染完成，切换到标准模式并自动开始测量"""
+        self.render_step_label.setText("🎧 渲染完成")
+        self.render_progress.setValue(100)
+        self.atmos_render_btn.setEnabled(True)
 
-        except Exception as e:
-            QMessageBox.critical(self, "渲染失败", f"渲染过程中出错:\n{str(e)}")
-            self.step_label.setText("渲染失败")
-            self.step_label.setStyleSheet("color: #e74c3c; font-weight: bold;")
-            import traceback
-            print(traceback.format_exc())
+        # 切换到单个多声道模式，加载渲染后的文件
+        self.btn_standard.setChecked(True)
+        self.on_input_mode_changed('standard')
+        self.current_file = output_path
+        p = Path(output_path)
+        self.filename_label.setText(f"✓ 渲染: {p.name}")
+        self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #9b59b6;")
+        self.path_label.setText(str(p.parent))
+        self._update_file_metadata(output_path)
+
+        # 自动设置声道配置
+        cfg_map = {"Stereo (2.0)": "stereo", "5.1 (6ch)": "5.1", "7.1 (8ch)": "7.1",
+                   "5.1.4 (10ch)": "5.1.4", "7.1.4 (12ch)": "7.1.4", "9.1.6 (16ch)": "9.1.6"}
+        if self.atmos_layout_combo.currentText() in cfg_map:
+            self.config_combo.setCurrentText(cfg_map[self.atmos_layout_combo.currentText()])
+
+        # 自动开始测量
+        self.start_measure()
+
+    def _on_render_error(self, error_msg: str):
+        """渲染出错"""
+        self.render_step_label.setText("🎧 渲染失败")
+        self.render_progress.setValue(0)
+        self.render_progress.setVisible(False)
+        self.atmos_render_btn.setEnabled(True)
+        QMessageBox.critical(self, "渲染失败", f"渲染过程中出错:\n{error_msg}")
 
     def browse(self):
         """浏览文件"""
