@@ -77,26 +77,26 @@ from mono_channel_matcher import (
 class ExportOptionsDialog(QDialog):
     def __init__(self, has_detailed, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("self.tr('导出选项')")
+        self.setWindowTitle(self.tr("导出选项"))
         self.setMinimumSize(400, 300)
         
         self.has_detailed = has_detailed
         
         layout = QVBoxLayout(self)
         
-        layout.addWidget(QLabel("self.tr('导出格式:')"))
+        layout.addWidget(QLabel(self.tr("导出格式:")))
         self.format_combo = QComboBox()
         self.format_combo.addItems(["TXT (文本报告)", "JSON (结构化数据)", "CSV (表格数据)"])
         layout.addWidget(self.format_combo)
         
         layout.addSpacing(20)
-        layout.addWidget(QLabel("self.tr('详细程度:')"))
+        layout.addWidget(QLabel(self.tr("详细程度:")))
         
         self.summary_check = QCheckBox("总体概况 (节目响度/最大短时/最大瞬时/真峰值/LRA)")
         self.summary_check.setChecked(True)
         layout.addWidget(self.summary_check)
         
-        layout.addWidget(QLabel("self.tr('Excel导出将包含:\n• 整体测量结果\n• 每秒短时响度 (3秒滑动窗口)\n• 每秒最大真峰值\n• 超标数值以红色标注')"))
+        layout.addWidget(QLabel(self.tr("Excel导出将包含:\n• 整体测量结果\n• 每秒短时响度 (3秒滑动窗口)\n• 每秒最大真峰值\n• 超标数值以红色标注")))
         
         layout.addStretch()
         
@@ -700,7 +700,7 @@ class LoudnessMeterApp(QMainWindow):
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
 
-        panel = QGroupBox("self.tr('📁 输入')")
+        panel = QGroupBox(self.tr("📁 输入"))
         panel.setStyleSheet("""
             QGroupBox {
                 font-weight: bold;
@@ -723,7 +723,7 @@ class LoudnessMeterApp(QMainWindow):
         layout.setContentsMargins(14, 14, 14, 14)
 
         # === 1. 输入方式分段按钮 ===
-        mode_group = QGroupBox("self.tr('输入方式')")
+        mode_group = QGroupBox(self.tr("输入方式"))
         mode_group.setStyleSheet("""
             QGroupBox {
                 font-size: 12px;
@@ -737,8 +737,8 @@ class LoudnessMeterApp(QMainWindow):
         self.mode_button_group = QButtonGroup(self)
         self.mode_button_group.setExclusive(True)
 
-        self.btn_mono = QPushButton("self.tr('🎵 多单声道')")
-        self.btn_standard = QPushButton("self.tr('📁 单个多声道')")
+        self.btn_mono = QPushButton(self.tr("🎵 多单声道"))
+        self.btn_standard = QPushButton(self.tr("📁 单个多声道"))
         self.btn_adm = QPushButton("📦 ADM/BW64")
 
         for btn in (self.btn_mono, self.btn_standard, self.btn_adm):
@@ -782,7 +782,7 @@ class LoudnessMeterApp(QMainWindow):
 
         # === 2. 文件信息卡片 ===
         # === 2. 文件信息卡片（单个多声道/ADM 模式显示） ===
-        self.file_info_group = QGroupBox("self.tr('文件信息')")
+        self.file_info_group = QGroupBox(self.tr("文件信息"))
         self.file_info_group.setStyleSheet("""
             QGroupBox {
                 font-size: 12px;
@@ -793,7 +793,7 @@ class LoudnessMeterApp(QMainWindow):
         file_layout = QVBoxLayout(self.file_info_group)
         file_layout.setSpacing(8)
 
-        self.filename_label = QLabel("self.tr('未选择文件')")
+        self.filename_label = QLabel(self.tr("未选择文件"))
         self.filename_label.setAlignment(Qt.AlignCenter)
         self.filename_label.setWordWrap(True)
         self.filename_label.setStyleSheet("""
@@ -840,7 +840,7 @@ class LoudnessMeterApp(QMainWindow):
         file_layout.addWidget(meta_widget)
 
         # === 浏览按钮（永久显示） ===
-        browse_btn = QPushButton("self.tr('浏览...')")
+        browse_btn = QPushButton(self.tr("浏览..."))
         browse_btn.setStyleSheet("""
             QPushButton {
                 background-color: #667eea;
@@ -865,7 +865,7 @@ class LoudnessMeterApp(QMainWindow):
         standard_layout.setSpacing(8)
 
         cfg_layout = QHBoxLayout()
-        cfg_layout.addWidget(QLabel("self.tr('声道配置:')"))
+        cfg_layout.addWidget(QLabel(self.tr("声道配置:")))
         self.config_combo = QComboBox()
         self.config_combo.addItems(["自动检测", "stereo", "5.1", "7.1", "5.1.4", "7.1.2", "7.1.4"])
         self.config_combo.setStyleSheet("""
@@ -888,7 +888,7 @@ class LoudnessMeterApp(QMainWindow):
         adm_layout.setContentsMargins(0, 0, 0, 0)
         adm_layout.setSpacing(8)
 
-        self.adm_info_group = QGroupBox("self.tr('ADM 信息')")
+        self.adm_info_group = QGroupBox(self.tr("ADM 信息"))
         self.adm_info_group.setStyleSheet("""
             QGroupBox {
                 border: 1px solid #e74c3c;
@@ -906,7 +906,7 @@ class LoudnessMeterApp(QMainWindow):
 
         self.adm_info = QTextEdit()
         self.adm_info.setReadOnly(True)
-        self.adm_info.setPlaceholderText("self.tr('ADM文件信息将显示在这里...')")
+        self.adm_info.setPlaceholderText(self.tr("ADM文件信息将显示在这里..."))
         self.adm_info.setMaximumHeight(160)
         self.adm_info.setStyleSheet("""
             QTextEdit {
@@ -922,7 +922,7 @@ class LoudnessMeterApp(QMainWindow):
         adm_layout.addWidget(self.adm_info_group)
 
         # Dolby Atmos / Audio Vivid 渲染选项
-        self.atmos_render_group = QGroupBox("self.tr('🎧 沉浸式音频渲染')")
+        self.atmos_render_group = QGroupBox(self.tr("🎧 沉浸式音频渲染"))
         self.atmos_render_group.setVisible(False)
         self.atmos_render_group.setMinimumHeight(160)
         self.atmos_render_group.setStyleSheet("""
@@ -940,13 +940,13 @@ class LoudnessMeterApp(QMainWindow):
         atmos_render_layout.setSpacing(6)
         atmos_render_layout.setContentsMargins(10, 10, 10, 10)
 
-        self.atmos_render_label = QLabel("self.tr('检测到动态对象音频，可选择渲染到目标声道布局后测量响度。\n注意：点击中间面板“开始测量”将仅测量声道响度，不包含对象。')")
+        self.atmos_render_label = QLabel(self.tr("检测到动态对象音频，可选择渲染到目标声道布局后测量响度。\n注意：点击中间面板“开始测量”将仅测量声道响度，不包含对象。"))
         self.atmos_render_label.setStyleSheet("color: #bbb; font-size: 10px;")
         self.atmos_render_label.setWordWrap(True)
         atmos_render_layout.addWidget(self.atmos_render_label)
 
         atmos_ctrl_layout = QHBoxLayout()
-        atmos_ctrl_layout.addWidget(QLabel("self.tr('目标布局:')"))
+        atmos_ctrl_layout.addWidget(QLabel(self.tr("目标布局:")))
         self.atmos_layout_combo = QComboBox()
         self.atmos_layout_combo.addItems(get_supported_layouts())
         self.atmos_layout_combo.setCurrentText("5.1.4 (10ch)")
@@ -961,7 +961,7 @@ class LoudnessMeterApp(QMainWindow):
         """)
         atmos_ctrl_layout.addWidget(self.atmos_layout_combo, 1)
 
-        self.atmos_render_btn = QPushButton("self.tr('🎯 渲染并测量')")
+        self.atmos_render_btn = QPushButton(self.tr("🎯 渲染并测量"))
         self.atmos_render_btn.setStyleSheet("""
             QPushButton {
                 background-color: #9b59b6;
@@ -990,7 +990,7 @@ class LoudnessMeterApp(QMainWindow):
         # 模板选择 + 控制按钮
         ctrl_layout = QHBoxLayout()
         ctrl_layout.setSpacing(6)
-        ctrl_layout.addWidget(QLabel("self.tr('声道模板:')"))
+        ctrl_layout.addWidget(QLabel(self.tr("声道模板:")))
         self.mono_template_combo = QComboBox()
         self.mono_template_combo.addItems([
             "自动检测", "Stereo (2.0)", "5.1 (6ch)", "7.1 (8ch)",
@@ -1007,7 +1007,7 @@ class LoudnessMeterApp(QMainWindow):
         """)
         ctrl_layout.addWidget(self.mono_template_combo, 1)
 
-        self.mono_match_btn = QPushButton("self.tr('🎯 自动匹配')")
+        self.mono_match_btn = QPushButton(self.tr("🎯 自动匹配"))
         self.mono_match_btn.setStyleSheet("""
             QPushButton {
                 background-color: #27ae60;
@@ -1024,24 +1024,24 @@ class LoudnessMeterApp(QMainWindow):
         ctrl_layout.addWidget(self.mono_match_btn)
 
         self.mono_up_btn = QPushButton("⬆️")
-        self.mono_up_btn.setToolTip("self.tr('上移')")
+        self.mono_up_btn.setToolTip(self.tr("上移"))
         self.mono_up_btn.setStyleSheet("QPushButton { padding: 5px 8px; font-size: 11px; }")
         self.mono_up_btn.clicked.connect(self._on_mono_move_up)
         ctrl_layout.addWidget(self.mono_up_btn)
 
         self.mono_down_btn = QPushButton("⬇️")
-        self.mono_down_btn.setToolTip("self.tr('下移')")
+        self.mono_down_btn.setToolTip(self.tr("下移"))
         self.mono_down_btn.setStyleSheet("QPushButton { padding: 5px 8px; font-size: 11px; }")
         self.mono_down_btn.clicked.connect(self._on_mono_move_down)
         ctrl_layout.addWidget(self.mono_down_btn)
 
         self.mono_del_btn = QPushButton("🗑️")
-        self.mono_del_btn.setToolTip("self.tr('删除选中')")
+        self.mono_del_btn.setToolTip(self.tr("删除选中"))
         self.mono_del_btn.setStyleSheet("QPushButton { padding: 5px 8px; font-size: 11px; }")
         self.mono_del_btn.clicked.connect(self._on_mono_delete)
         ctrl_layout.addWidget(self.mono_del_btn)
 
-        self.mono_clear_btn = QPushButton("self.tr('清空')")
+        self.mono_clear_btn = QPushButton(self.tr("清空"))
         self.mono_clear_btn.setStyleSheet("""
             QPushButton {
                 background-color: #c0392b;
@@ -1057,7 +1057,7 @@ class LoudnessMeterApp(QMainWindow):
         ctrl_layout.addWidget(self.mono_clear_btn)
         mono_layout.addLayout(ctrl_layout)
 
-        self.mono_files_group = QGroupBox('self.tr("📋 声道匹配 (双击声道可编辑)")')
+        self.mono_files_group = QGroupBox(self.tr("📋 声道匹配 (双击声道可编辑)"))
         self.mono_files_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self.mono_files_group.setStyleSheet("""
             QGroupBox {
@@ -1166,7 +1166,7 @@ class LoudnessMeterApp(QMainWindow):
     def _on_mono_auto_match(self):
         """对当前已加载的文件重新执行自动匹配"""
         if not self.mono_files:
-            QMessageBox.information(self, "self.tr('提示')", "请先选择文件")
+            QMessageBox.information(self, self.tr("提示"), "请先选择文件")
             return
         template_map = {
             "Stereo (2.0)": "Stereo (2.0)",
@@ -1232,7 +1232,7 @@ class LoudnessMeterApp(QMainWindow):
         """清空多单声道文件列表"""
         self.mono_files = []
         self._update_mono_files_list()
-        self.filename_label.setText("self.tr('未选择文件')")
+        self.filename_label.setText(self.tr("未选择文件"))
         self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #667eea;")
         self.path_label.setText("")
 
@@ -1338,10 +1338,10 @@ class LoudnessMeterApp(QMainWindow):
 
                     return
             except Exception as e:
-                QMessageBox.warning(self, "self.tr('文件错误')", f"无法读取文件:\n{e}")
+                QMessageBox.warning(self, self.tr("文件错误"), f"无法读取文件:\n{e}")
                 return
 
-        QMessageBox.warning(self, "self.tr('不支持的文件')", f"无法识别该文件类型:\n{p.name}")
+        QMessageBox.warning(self, self.tr("不支持的文件"), f"无法识别该文件类型:\n{p.name}")
 
     
     def _create_center_panel(self):
@@ -1361,7 +1361,7 @@ class LoudnessMeterApp(QMainWindow):
         header_layout.setAlignment(Qt.AlignCenter)
         
         # 咿呀服了吗
-        il_label = QLabel('self.tr("咿了吗")')
+        il_label = QLabel(self.tr("咿了吗"))
         il_label.setStyleSheet('color: #667eea; font-size: 10px; font-weight: thin; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; letter-spacing: 24px; border: none;')
         il_label.setAlignment(Qt.AlignCenter)
         header_layout.addWidget(il_label)
@@ -1384,7 +1384,7 @@ class LoudnessMeterApp(QMainWindow):
         bottom_layout.setContentsMargins(0, 2, 0, 0)
         bottom_layout.addStretch(1)
         
-        cn_label = QLabel('self.tr("沉浸式音频文件响度测量工具")')
+        cn_label = QLabel(self.tr("沉浸式音频文件响度测量工具"))
         cn_label.setStyleSheet('color: #8899cc; font-size: 10px; font-family: "Microsoft YaHei", "Segoe UI", sans-serif; letter-spacing: 1px; border: none;')
         cn_label.setAlignment(Qt.AlignCenter)
         bottom_layout.addWidget(cn_label)
@@ -1409,11 +1409,11 @@ class LoudnessMeterApp(QMainWindow):
         layout.addWidget(header_widget)
         
         # === 原有内容 ===
-        content_widget = QGroupBox('self.tr("⚙️ 标准与进度")')
+        content_widget = QGroupBox(self.tr("⚙️ 标准与进度"))
         content_layout = QVBoxLayout(content_widget)
         content_layout.setSpacing(8)
         
-        content_layout.addWidget(QLabel('self.tr("响度标准:")'))
+        content_layout.addWidget(QLabel(self.tr("响度标准:")))
         self.std_combo = QComboBox()
         self.std_combo.addItems(list(LOUDNESS_STANDARDS.keys()))
         self.std_combo.currentTextChanged.connect(self.on_std_changed)
@@ -1449,12 +1449,12 @@ class LoudnessMeterApp(QMainWindow):
         """)
         content_layout.addWidget(self.render_progress)
         
-        content_layout.addWidget(QLabel('self.tr("当前步骤:")'))
-        self.step_label = QLabel('self.tr("等待开始")')
+        content_layout.addWidget(QLabel(self.tr("当前步骤:")))
+        self.step_label = QLabel(self.tr("等待开始"))
         self.step_label.setStyleSheet('color: #667eea; font-weight: bold;')
         content_layout.addWidget(self.step_label)
         
-        content_layout.addWidget(QLabel('self.tr("总进度:")'))
+        content_layout.addWidget(QLabel(self.tr("总进度:")))
         self.progress = QProgressBar()
         self.progress.setVisible(False)
         content_layout.addWidget(self.progress)
@@ -1464,7 +1464,7 @@ class LoudnessMeterApp(QMainWindow):
         self.process_info.setAlignment(Qt.AlignCenter)
         content_layout.addWidget(self.process_info)
         
-        self.start_btn = QPushButton('self.tr("▶ 开始测量")')
+        self.start_btn = QPushButton(self.tr("▶ 开始测量"))
         self.start_btn.setStyleSheet('QPushButton { background-color: #667eea; color: white; font-weight: bold; font-size: 16px; padding: 12px; border-radius: 8px; } QPushButton:hover { background-color: #764ba2; }')
         self.start_btn.clicked.connect(self.start_measure)
         content_layout.addWidget(self.start_btn)
@@ -1474,7 +1474,7 @@ class LoudnessMeterApp(QMainWindow):
         layout.addStretch()
         return panel
     def _create_right_panel(self):
-        panel = QGroupBox("self.tr('📊 结果与导出')")
+        panel = QGroupBox(self.tr("📊 结果与导出"))
         layout = QVBoxLayout(panel)
         layout.setSpacing(8)
         
@@ -1493,18 +1493,18 @@ class LoudnessMeterApp(QMainWindow):
         layout.addWidget(self.result_table)
         
         status_layout = QHBoxLayout()
-        self.int_status = QLabel("self.tr('节目响度: --')")
+        self.int_status = QLabel(self.tr("节目响度: --"))
         self.int_status.setAlignment(Qt.AlignCenter)
         self.int_status.setStyleSheet("padding: 4px; border-radius: 4px;")
         status_layout.addWidget(self.int_status)
         
-        self.tp_status = QLabel("self.tr('峰值: --')")
+        self.tp_status = QLabel(self.tr("峰值: --"))
         self.tp_status.setAlignment(Qt.AlignCenter)
         self.tp_status.setStyleSheet("padding: 4px; border-radius: 4px;")
         status_layout.addWidget(self.tp_status)
         layout.addLayout(status_layout)
         
-        export_box = QGroupBox("self.tr('导出')")
+        export_box = QGroupBox(self.tr("导出"))
         export_layout = QVBoxLayout(export_box)
         
         btn_layout = QHBoxLayout()
@@ -1524,14 +1524,14 @@ class LoudnessMeterApp(QMainWindow):
         btn_layout.addWidget(self.export_excel_btn)
         export_layout.addLayout(btn_layout)
         
-        export_note = QLabel("self.tr('TXT: 文本报告 | JSON: 结构化数据\nExcel: 包含每秒详细数据')")
+        export_note = QLabel(self.tr("TXT: 文本报告 | JSON: 结构化数据\nExcel: 包含每秒详细数据"))
         export_note.setStyleSheet("color: #888; font-size: 10px;")
         export_note.setAlignment(Qt.AlignCenter)
         export_layout.addWidget(export_note)
         
         layout.addWidget(export_box)
         
-        self.status = QLabel("self.tr('就绪')")
+        self.status = QLabel(self.tr("就绪"))
         self.status.setAlignment(Qt.AlignCenter)
         self.status.setStyleSheet("color: #888; font-size: 11px;")
         layout.addWidget(self.status)
@@ -1612,7 +1612,7 @@ class LoudnessMeterApp(QMainWindow):
         if hasattr(self, 'file_info_group'):
             self.file_info_group.setVisible(mode != 'mono')
         if hasattr(self, 'filename_label'):
-            self.filename_label.setText("self.tr('未选择文件')")
+            self.filename_label.setText(self.tr("未选择文件"))
             self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #667eea;")
         if hasattr(self, 'path_label'):
             self.path_label.setText("")
@@ -1620,7 +1620,7 @@ class LoudnessMeterApp(QMainWindow):
 
         if hasattr(self, 'adm_info'):
             self.adm_info.clear()
-            self.adm_info.setPlaceholderText("self.tr('ADM文件信息将显示在这里...')")
+            self.adm_info.setPlaceholderText(self.tr("ADM文件信息将显示在这里..."))
         if hasattr(self, 'atmos_render_group'):
             self.atmos_render_group.setVisible(False)
         if hasattr(self, 'mono_files_group'):
@@ -1631,7 +1631,7 @@ class LoudnessMeterApp(QMainWindow):
     def _render_and_measure_adm(self):
         """渲染 ADM 文件到目标布局，然后测量响度（后台线程带进度条）"""
         if not self.current_file or not Path(self.current_file).exists():
-            QMessageBox.warning(self, "self.tr('提示')", "请先选择 ADM 文件")
+            QMessageBox.warning(self, self.tr("提示"), "请先选择 ADM 文件")
             return
 
         target_layout = self.atmos_layout_combo.currentText()
@@ -1639,7 +1639,7 @@ class LoudnessMeterApp(QMainWindow):
         from renderers.ear_renderer import is_object_based_adm
 
         if not is_object_based_adm(self.current_file):
-            QMessageBox.information(self, "self.tr('提示')", "该文件不包含动态对象音频，无需渲染。")
+            QMessageBox.information(self, self.tr("提示"), "该文件不包含动态对象音频，无需渲染。")
             return
 
         # 禁用渲染按钮防止重复点击
@@ -1664,7 +1664,7 @@ class LoudnessMeterApp(QMainWindow):
 
     def _on_render_finished(self, output_path: str):
         """渲染完成，切换到标准模式并自动开始测量"""
-        self.render_step_label.setText("self.tr('🎧 渲染完成')")
+        self.render_step_label.setText(self.tr("🎧 渲染完成"))
         self.render_progress.setValue(100)
         self.atmos_render_btn.setEnabled(True)
 
@@ -1689,11 +1689,11 @@ class LoudnessMeterApp(QMainWindow):
 
     def _on_render_error(self, error_msg: str):
         """渲染出错"""
-        self.render_step_label.setText("self.tr('🎧 渲染失败')")
+        self.render_step_label.setText(self.tr("🎧 渲染失败"))
         self.render_progress.setValue(0)
         self.render_progress.setVisible(False)
         self.atmos_render_btn.setEnabled(True)
-        QMessageBox.critical(self, "self.tr('渲染失败')", f"渲染过程中出错:\n{error_msg}")
+        QMessageBox.critical(self, self.tr("渲染失败"), f"渲染过程中出错:\n{error_msg}")
 
     def browse(self):
         """浏览文件"""
@@ -1705,7 +1705,7 @@ class LoudnessMeterApp(QMainWindow):
         elif self.btn_adm.isChecked():
             mode = 'adm'
         else:
-            QMessageBox.warning(self, "self.tr('提示')", "请先选择输入方式")
+            QMessageBox.warning(self, self.tr("提示"), "请先选择输入方式")
             return
         
         if mode == 'standard':  # 单个多声道文件
@@ -1761,7 +1761,7 @@ class LoudnessMeterApp(QMainWindow):
                     skipped.append(f"{Path(path).name}: {e}")
 
             if skipped:
-                QMessageBox.information(self, "self.tr('跳过文件')", "以下文件不是单声道或无法读取:\n" + "\n".join(skipped[:10]))
+                QMessageBox.information(self, self.tr("跳过文件"), "以下文件不是单声道或无法读取:\n" + "\n".join(skipped[:10]))
 
             if not valid_files:
                 return
@@ -1813,13 +1813,13 @@ class LoudnessMeterApp(QMainWindow):
                     parser.parse()
                     input_data = parser
                 except Exception as e:
-                    QMessageBox.critical(self, "self.tr('ADM错误')", str(e))
+                    QMessageBox.critical(self, self.tr("ADM错误"), str(e))
                     return
         elif self.btn_mono.isChecked() and self.mono_files:
             input_mode = 'mono_list'
             input_data = self.mono_files
         else:
-            QMessageBox.warning(self, "self.tr('提示')", "请先选择输入文件")
+            QMessageBox.warning(self, self.tr("提示"), "请先选择输入文件")
             return
         
         # 获取当前声道配置和标准
@@ -1865,7 +1865,7 @@ class LoudnessMeterApp(QMainWindow):
         self.current_results = results
         self.progress.setVisible(False)
         self.start_btn.setEnabled(True)
-        self.step_label.setText("self.tr('完成')")
+        self.step_label.setText(self.tr("完成"))
         
         std = self.current_standard
         
@@ -1901,8 +1901,8 @@ class LoudnessMeterApp(QMainWindow):
     def on_error(self, msg):
         self.progress.setVisible(False)
         self.start_btn.setEnabled(True)
-        self.step_label.setText("self.tr('错误')")
-        QMessageBox.critical(self, "self.tr('错误')", msg)
+        self.step_label.setText(self.tr("错误"))
+        QMessageBox.critical(self, self.tr("错误"), msg)
     
     def _build_file_info(self) -> dict:
         """构建当前被测文件信息字典"""
@@ -2031,7 +2031,7 @@ class LoudnessMeterApp(QMainWindow):
             self.status.setText(f"已导出: {Path(path).name}")
             
         except Exception as e:
-            QMessageBox.critical(self, "self.tr('导出失败')", str(e))
+            QMessageBox.critical(self, self.tr("导出失败"), str(e))
     
     def _export_excel_detailed(self, path: str, opts: dict):
         """导出详细Excel报告 (.xlsx)
@@ -2045,7 +2045,7 @@ class LoudnessMeterApp(QMainWindow):
             import openpyxl
             from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
         except ImportError:
-            QMessageBox.warning(self, "self.tr('缺少依赖')", "请安装 openpyxl: pip install openpyxl")
+            QMessageBox.warning(self, self.tr("缺少依赖"), "请安装 openpyxl: pip install openpyxl")
             return
         
         detailed = self.current_results.get('detailed_data')
