@@ -31,3 +31,8 @@ Thumbs.db
 backups/
 exports/
 *.bak
+*.wav
+*.mp3
+*.flac
+i18n_debug.py
+icon edit/

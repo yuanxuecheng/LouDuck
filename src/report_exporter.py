@@ -6,6 +6,7 @@ from datetime import datetime
 from dataclasses import dataclass
 from typing import List
 from pathlib import Path
+from PySide6.QtCore import QCoreApplication
 
 
 @dataclass
@@ -49,15 +50,15 @@ class ReportExporter:
         """导出 TXT"""
         lines = [
             "=" * 60,
-            "      ITU-R BS.1770-5 响度测量报告",
+            QCoreApplication.translate("ReportExporter", "      ITU-R BS.1770-5 Loudness Measurement Report"),
             "=" * 60,
             "",
-            f"测量时间: {self.results.measurement_time}",
-            f"文件路径: {self.results.file_path or '-'}",
-            f"文件名称: {self.results.file_name or self.results.filename}",
-            f"时长:     {self._format_duration(self.results.duration)}",
-            f"采样率:   {self.results.sample_rate} Hz",
-            f"声道数:   {self.results.channels}",
+            QCoreApplication.translate("ReportExporter", "测量时间: {time}").format(time=self.results.measurement_time),
+            QCoreApplication.translate("ReportExporter", "文件路径: {path}").format(path=self.results.file_path or "-"),
+            QCoreApplication.translate("ReportExporter", "文件名称: {name}").format(name=self.results.file_name or self.results.filename),
+            QCoreApplication.translate("ReportExporter", "时长:     {duration}").format(duration=self._format_duration(self.results.duration)),
+            QCoreApplication.translate("ReportExporter", "采样率:   {sr} Hz").format(sr=self.results.sample_rate),
+            QCoreApplication.translate("ReportExporter", "声道数:   {ch}").format(ch=self.results.channels),
         ]
         
         # ADM / 渲染器信息
@@ -65,23 +66,23 @@ class ReportExporter:
             lines.extend([
                 "",
                 "-" * 60,
-                "ADM 信息:",
+                QCoreApplication.translate("ReportExporter", "ADM 信息:"),
                 "-" * 60,
                 self.results.adm_info,
             ])
         if self.results.renderer_info:
-            lines.append(f"渲染器:   {self.results.renderer_info}")
+            lines.append(QCoreApplication.translate("ReportExporter", "渲染器:   {info}").format(info=self.results.renderer_info))
         if self.results.authoring_info:
-            lines.append(f"创作软件: {self.results.authoring_info}")
+            lines.append(QCoreApplication.translate("ReportExporter", "创作软件: {info}").format(info=self.results.authoring_info))
         if self.results.ref_layout:
-            lines.append(f"参考布局: {self.results.ref_layout}")
+            lines.append(QCoreApplication.translate("ReportExporter", "参考布局: {layout}").format(layout=self.results.ref_layout))
         
         # 多单声道文件列表
         if self.results.mono_files:
             lines.extend([
                 "",
                 "-" * 60,
-                "多单声道文件列表:",
+                QCoreApplication.translate("ReportExporter", "多单声道文件列表:"),
                 "-" * 60,
             ])
             for item in self.results.mono_files:
@@ -90,17 +91,17 @@ class ReportExporter:
         lines.extend([
             "",
             "-" * 60,
-            "测量结果:",
+            QCoreApplication.translate("ReportExporter", "测量结果:"),
             "-" * 60,
-            f"  节目响度:      {self.results.integrated:+.2f} LUFS",
-            f"  最大短时响度:  {self.results.short_term:+.2f} LUFS",
-            f"  最大瞬时响度:  {self.results.momentary:+.2f} LUFS",
-            f"  最大真峰值:    {self.results.true_peak:+.2f} dBTP",
-            f"  响度范围:      {self.results.lra:.2f} LU",
+            QCoreApplication.translate("ReportExporter", "  节目响度:      {val:+.2f} LUFS").format(val=self.results.integrated),
+            QCoreApplication.translate("ReportExporter", "  最大短时响度:  {val:+.2f} LUFS").format(val=self.results.short_term),
+            QCoreApplication.translate("ReportExporter", "  最大瞬时响度:  {val:+.2f} LUFS").format(val=self.results.momentary),
+            QCoreApplication.translate("ReportExporter", "  最大真峰值:    {val:+.2f} dBTP").format(val=self.results.true_peak),
+            QCoreApplication.translate("ReportExporter", "  响度范围:      {val:.2f} LU").format(val=self.results.lra),
             "",
-            "合规性:",
-            f"  EBU R128:  {'通过' if abs(self.results.integrated - (-23)) <= 1.0 else '未通过'}",
-            f"  真峰值:    {'通过' if self.results.true_peak <= -1.0 else '超标'}",
+            QCoreApplication.translate("ReportExporter", "合规性:"),
+            QCoreApplication.translate("ReportExporter", "  EBU R128:  {status}").format(status=(QCoreApplication.translate("ReportExporter", "通过") if abs(self.results.integrated - (-23)) <= 1.0 else QCoreApplication.translate("ReportExporter", "未通过"))),
+            QCoreApplication.translate("ReportExporter", "  真峰值:    {status}").format(status=(QCoreApplication.translate("ReportExporter", "通过") if self.results.true_peak <= -1.0 else QCoreApplication.translate("ReportExporter", "超标"))),
             "=" * 60,
         ])
         
@@ -170,13 +171,13 @@ class ReportExporter:
             writer.writerow(["Metric", "Value", "Unit", "Target", "Status"])
             
             rows = [
-                ["节目响度", f"{self.results.integrated:.4f}", "LUFS", "-23.0", 
+                [QCoreApplication.translate("ReportExporter", "节目响度"), f"{self.results.integrated:.4f}", "LUFS", "-23.0", 
                  "Pass" if abs(self.results.integrated - (-23)) <= 1.0 else "Fail"],
-                ["最大短时响度", f"{self.results.short_term:.4f}", "LUFS", "-23.0", "-"],
-                ["最大瞬时响度", f"{self.results.momentary:.4f}", "LUFS", "-", "-"],
-                ["最大真峰值", f"{self.results.true_peak:.4f}", "dBTP", "-1.0",
+                [QCoreApplication.translate("ReportExporter", "最大短时响度"), f"{self.results.short_term:.4f}", "LUFS", "-23.0", "-"],
+                [QCoreApplication.translate("ReportExporter", "最大瞬时响度"), f"{self.results.momentary:.4f}", "LUFS", "-", "-"],
+                [QCoreApplication.translate("ReportExporter", "最大真峰值"), f"{self.results.true_peak:.4f}", "dBTP", "-1.0",
                  "Pass" if self.results.true_peak <= -1.0 else "Fail"],
-                ["响度范围", f"{self.results.lra:.4f}", "LU", "-", "-"],
+                [QCoreApplication.translate("ReportExporter", "响度范围"), f"{self.results.lra:.4f}", "LU", "-", "-"],
             ]
             writer.writerows(rows)
         

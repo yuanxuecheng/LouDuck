@@ -8,8 +8,6 @@ ITU-R BS.1770-5 响度测量仪 v3.2 (整合修复版)
 """
 
 import sys
-import soundfile as sf
-import numpy as np
 import time
 import re
 from datetime import datetime
@@ -22,14 +20,10 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QGroupBox, QMessageBox, QComboBox, QDialog,
     QListWidget, QAbstractItemView, QDialogButtonBox, QLineEdit,
     QFrame, QCheckBox, QSpinBox, QTextEdit, QSizePolicy,
-    QButtonGroup, QScrollArea, QGridLayout, QStyledItemDelegate
+    QButtonGroup, QScrollArea, QGridLayout, QStyledItemDelegate, QHeaderView
 )
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QFont, QColor
-
-from itu1770_meter import ITU1770Meter, ChannelConfig
-from report_exporter import LoudnessResults, ReportExporter
-from adm_parser import BW64Parser, is_adm_file
 
 
 @dataclass
@@ -86,13 +80,13 @@ class ExportOptionsDialog(QDialog):
         
         layout.addWidget(QLabel(self.tr("导出格式:")))
         self.format_combo = QComboBox()
-        self.format_combo.addItems(["TXT (文本报告)", "JSON (结构化数据)", "CSV (表格数据)"])
+        self.format_combo.addItems([self.tr("TXT (文本报告)"), self.tr("JSON (结构化数据)"), self.tr("CSV (表格数据)")])
         layout.addWidget(self.format_combo)
         
         layout.addSpacing(20)
         layout.addWidget(QLabel(self.tr("详细程度:")))
         
-        self.summary_check = QCheckBox("总体概况 (节目响度/最大短时/最大瞬时/真峰值/LRA)")
+        self.summary_check = QCheckBox(self.tr("总体概况 (节目响度/最大短时/最大瞬时/真峰值/LRA)"))
         self.summary_check.setChecked(True)
         layout.addWidget(self.summary_check)
         
@@ -137,10 +131,10 @@ class DetailedMeasurementWorker(QThread):
             start_time = time.time()
             audio = None
             sr = None
-            filename = "测量文件"
+            filename = self.tr("测量文件")
             
             # === 阶段1: 准备 (0-15%) ===
-            self.sub_step.emit("准备音频...", 0)
+            self.sub_step.emit(self.tr("准备音频..."), 0)
             
             if self.input_mode == 'file':
                 file_path = self.input_data
@@ -151,25 +145,25 @@ class DetailedMeasurementWorker(QThread):
                 
                 # 小文件(<50MB)直接加载
                 if file_size < 50 * 1024 * 1024:
-                    self.sub_step.emit(f"加载: {filename[:30]}", 5)
+                    self.sub_step.emit(self.tr("加载: {name}").format(name=filename[:30]), 5)
                     audio, sr = sf.read(file_path, dtype='float32')
-                    self.sub_step.emit("加载完成", 15)
+                    self.sub_step.emit(self.tr("加载完成"), 15)
                 else:
                     # 大文件分块加载，显示进度 5-15%
                     audio, sr = self._load_large_file(file_path, file_size)
                     
             elif self.input_mode == 'adm':
                 parser = self.input_data
-                self.sub_step.emit("读取ADM...", 5)
+                self.sub_step.emit(self.tr("读取 ADM..."), 5)
                 audio, sr = parser.read_audio()
-                self.sub_step.emit("ADM加载完成", 15)
-                filename = "ADM文件"
+                self.sub_step.emit(self.tr("ADM 加载完成"), 15)
+                filename = self.tr("ADM文件")
                 
             elif self.input_mode == 'mono_list':
                 mono_files = self.input_data
                 total_files = len(mono_files)
                 
-                self.sub_step.emit("分析文件...", 2)
+                self.sub_step.emit(self.tr("分析文件..."), 2)
                 max_samples = 0
                 sr = None
                 
@@ -179,24 +173,24 @@ class DetailedMeasurementWorker(QThread):
                     if sr is None:
                         sr = info.samplerate
                     progress = 2 + (i + 1) / total_files * 5
-                    self.sub_step.emit(f"分析: {name}", int(progress))
+                    self.sub_step.emit(self.tr("分析: {name}").format(name=name), int(progress))
                 
                 num_channels = len(mono_files)
                 audio = np.zeros((max_samples, num_channels), dtype=np.float32)
                 
                 for i, (path, name) in enumerate(mono_files):
                     progress = 7 + i / num_channels * 8
-                    self.sub_step.emit(f"加载: {name}", int(progress))
+                    self.sub_step.emit(self.tr("加载: {name}").format(name=name), int(progress))
                     data, _ = sf.read(path, dtype='float32')
                     if data.ndim > 1:
                         data = data[:, 0]
                     copy_len = min(len(data), max_samples)
                     audio[:copy_len, i] = data[:copy_len]
                 
-                self.sub_step.emit("多单声道加载完成", 15)
+                self.sub_step.emit(self.tr("多单声道加载完成"), 15)
             
             if audio is None:
-                raise ValueError("音频加载失败")
+                raise ValueError(self.tr("音频加载失败"))
             
             if audio.ndim == 1:
                 audio = audio.reshape(-1, 1)
@@ -206,7 +200,7 @@ class DetailedMeasurementWorker(QThread):
             self.audio_duration = actual_duration  # 保存音频时长用于倍速计算
             
             # === 阶段2: 初始化测量器 (15-20%) ===
-            self.sub_step.emit(f"初始化: {num_channels}ch, {actual_duration:.1f}s", 15)
+            self.sub_step.emit(self.tr("初始化: {num_channels} ch, {actual_duration:.1f} s").format(num_channels=num_channels, actual_duration=actual_duration), 15)
             
             if self.input_mode == 'adm':
                 adm_config = self.input_data.adm.to_itu1770_config()
@@ -219,7 +213,7 @@ class DetailedMeasurementWorker(QThread):
                     config = ITU1770Meter.CONFIGS.get(config_name, ITU1770Meter.auto_config(num_channels))
                 meter = ITU1770Meter(config, sr)
             
-            self.sub_step.emit("开始测量...", 20)
+            self.sub_step.emit(self.tr("开始测量..."), 20)
             self.process_start_time = time.time()  # 记录处理开始时间
             
             # === 阶段3: 响度测量 (20-90%) ===
@@ -235,14 +229,14 @@ class DetailedMeasurementWorker(QThread):
                     processed_time = (current_block / total_blocks) * self.audio_duration
                     if elapsed > 0 and processed_time > 0:
                         speed_ratio = processed_time / elapsed
-                        speed_str = f" | ⚡{speed_ratio:.1f}x实时"
+                        speed_str = self.tr(" | ⚡{ratio:.1f}x 实时").format(ratio=speed_ratio)
                 
-                self.sub_step.emit(f"测量中... {current_block}/{total_blocks}块{speed_str}", int(progress_pct))
+                self.sub_step.emit(self.tr("测量中... {current_block}/{total_blocks} 块{speed_str}").format(current_block=current_block, total_blocks=total_blocks, speed_str=speed_str), int(progress_pct))
             
             result = meter.process_audio(audio, sr, progress_callback=on_process_progress)
             
             # === 阶段4: 最终计算 (90-95%) ===
-            self.sub_step.emit("计算最终指标...", 90)
+            self.sub_step.emit(self.tr("计算最终指标..."), 90)
             
             # 获取结果（使用最大值）
             integrated = result['integrated']
@@ -255,7 +249,7 @@ class DetailedMeasurementWorker(QThread):
             detailed_data = self._build_detailed_data(result, actual_duration)
             
             # === 阶段5: 完成 (95-100%) ===
-            self.sub_step.emit("整理结果...", 95)
+            self.sub_step.emit(self.tr("整理结果..."), 95)
             
             final_results = {
                 'integrated': integrated,
@@ -272,7 +266,7 @@ class DetailedMeasurementWorker(QThread):
                 'detailed_data': detailed_data
             }
             
-            self.sub_step.emit("完成", 100)
+            self.sub_step.emit(self.tr("完成"), 100)
             self.finished_signal.emit(final_results)
             
         except Exception as e:
@@ -310,7 +304,7 @@ class DetailedMeasurementWorker(QThread):
                 progress = 5 + (loaded_size / file_size) * 10
                 mb_loaded = loaded_size / (1024 * 1024)
                 mb_total = file_size / (1024 * 1024)
-                self.sub_step.emit(f"加载中... {mb_loaded:.1f}/{mb_total:.1f}MB", int(progress))
+                self.sub_step.emit(self.tr("加载中... {mb_loaded:.1f}/{mb_total:.1f} MB").format(mb_loaded=mb_loaded, mb_total=mb_total), int(progress))
         
         return audio, sr
 
@@ -415,7 +409,7 @@ class DetailedMeasurementWorker(QThread):
         # 逐个加载
         for i, (path, name) in enumerate(mono_files):
             progress = 10 + (i / total_files) * 20
-            self.sub_step.emit(f"加载: {name} ({i+1}/{total_files})", int(progress))
+            self.sub_step.emit(self.tr("加载: {name} ({current}/{total})").format(name=name, current=i+1, total=total_files), int(progress))
             
             data, _ = sf.read(path, dtype='float32')
             if data.ndim > 1:
@@ -495,13 +489,16 @@ class LoudnessMeterApp(QMainWindow):
         main_layout.setContentsMargins(10, 10, 10, 10)
         
         left = self._create_left_panel()
-        main_layout.addWidget(left, 35)
+        left.setMinimumWidth(420)
+        main_layout.addWidget(left, 40)
         
         center = self._create_center_panel()
-        main_layout.addWidget(center, 30)
+        center.setMaximumWidth(380)
+        main_layout.addWidget(center, 25)
         
         right = self._create_right_panel()
-        main_layout.addWidget(right, 35)
+        right.setMinimumWidth(260)
+        main_layout.addWidget(right, 30)
 
     def _update_mono_files_list(self):
         """更新多单声道文件列表显示，支持编辑声道和顺序"""
@@ -544,42 +541,42 @@ class LoudnessMeterApp(QMainWindow):
         """解析ADM文件并在UI中显示详细信息"""
         try:
             self.adm_info.clear()
-            self.adm_info.setPlainText("正在解析ADM...")
+            self.adm_info.setPlainText(self.tr("正在解析 ADM..."))
             QApplication.processEvents()  # 立即更新UI
             
             parser = BW64Parser(file_path)
             adm = parser.parse()
             
             if not adm:
-                self.adm_info.setPlainText("[错误] 无法解析ADM元数据\n\n可能原因：\n1. 文件不是有效的ADM/BW64格式\n2. XML命名空间不匹配")
+                self.adm_info.setPlainText(self.tr("[错误] 无法解析 ADM 元数据\n\n可能原因：\n1. 文件不是有效的 ADM/BW64 格式\n2. XML 命名空间不匹配"))
                 return
             
             # 检查解析结果是否为空
             if not adm.channel_formats and not adm.programmes:
-                self.adm_info.setPlainText("[警告] ADM元数据解析为空\n\n可能原因：\n1. 命名空间检测失败\n2. 文件不包含ADM数据")
+                self.adm_info.setPlainText(self.tr("[警告] ADM 元数据解析为空\n\n可能原因：\n1. 命名空间检测失败\n2. 文件不包含 ADM 数据"))
                 return
             
             # 收集信息
             lines = []
-            lines.append(f"📦 文件: {Path(file_path).name}")
+            lines.append(self.tr("📦 文件: {name}").format(name=Path(file_path).name))
             lines.append("")
             
             # 节目信息
             if adm.programmes:
                 prog_name = adm.programmes[0].get('name', 'N/A')
-                lines.append(f"🎬 节目: {prog_name}")
+                lines.append(self.tr("🎬 节目: {name}").format(name=prog_name))
             
             # 内容统计
             content_count = len(adm.contents)
             object_count = len(adm.objects)
-            lines.append(f"📊 内容: {content_count}个Content, {object_count}个Object")
+            lines.append(self.tr("📊 内容: {cc} 个 Content, {oc} 个 Object").format(cc=content_count, oc=object_count))
             
             # 声床分析
             direct_speakers = [ch for ch in adm.channel_formats if ch.type == 'DirectSpeakers']
             objects_ch = [ch for ch in adm.channel_formats if ch.type == 'Objects']
             
             lines.append("")
-            lines.append(f"🔊 声床配置 ({len(direct_speakers)} DirectSpeakers):")
+            lines.append(self.tr("🔊 声床配置 ({count} DirectSpeakers):").format(count=len(direct_speakers)))
             
             # 显示声床详情
             for i, ch in enumerate(direct_speakers):
@@ -599,11 +596,11 @@ class LoudnessMeterApp(QMainWindow):
             has_objects = bool(objects_ch)
             if has_objects:
                 lines.append("")
-                lines.append(f"⚠️ 包含 {len(objects_ch)} 个动态对象(Object)")
+                lines.append(self.tr("⚠️ 包含 {count} 个动态对象 (Object)").format(count=len(objects_ch)))
                 self.atmos_render_group.setVisible(True)
                 self.atmos_render_label.setText(
-                    f"检测到 {len(objects_ch)} 个动态对象，可选择渲染到目标声道布局后，点击“渲染并测量”测量。\n"
-                    f"注意：点击中间面板“开始测量”将仅测量声道响度，不包含对象。"
+                    self.tr("检测到 {count} 个动态对象，可选择渲染到目标声道布局后，点击“渲染并测量”测量。\n"
+                            "注意：点击中间面板“开始测量”将仅测量声道响度，不包含对象。").format(count=len(objects_ch))
                 )
             else:
                 self.atmos_render_group.setVisible(False)
@@ -625,31 +622,31 @@ class LoudnessMeterApp(QMainWindow):
             
             if detected and detected != 'unknown':
                 self.config_combo.setCurrentText(detected)
-                lines.append(f"🎯 自动识别为: {description} ({ch_count}ch声床, 置信度{confidence:.0%})")
+                lines.append(self.tr("🎯 自动识别为: {desc} ({ch_count} ch 声床, 置信度 {conf})").format(desc=description, ch_count=ch_count, conf=f"{confidence:.0%}"))
             else:
                 # 回退到数量映射
                 cfg_map = {
                     2: 'stereo', 6: '5.1', 8: '7.1', 
                     10: '5.1.4', 12: '7.1.4', 16: '9.1.6'
                 }
-                fallback = cfg_map.get(ch_count, '未知')
+                fallback = cfg_map.get(ch_count, self.tr('未知'))
                 if ch_count in cfg_map:
                     self.config_combo.setCurrentText(cfg_map[ch_count])
                 else:
-                    self.config_combo.setCurrentText("自动检测")
-                lines.append(f"⚠️ 基于数量识别: {fallback} ({ch_count}ch)")
+                    self.config_combo.setCurrentText(self.tr("自动检测"))
+                lines.append(self.tr("⚠️ 基于数量识别: {fallback} ({ch_count} ch)").format(fallback=fallback, ch_count=ch_count))
                 if detected == 'unknown':
-                    lines.append("   (特征识别失败，请手动确认)")
+                    lines.append(self.tr("   (特征识别失败，请手动确认)"))
             
             # 渲染器与创作软件信息（合并到 adm_info 中）
             lines.append("")
             lines.append("─" * 36)
-            lines.append("🎛️ 渲染器与创作软件信息")
+            lines.append(self.tr("🎛️ 渲染器与创作软件信息"))
             lines.append("─" * 36)
             
             if adm.renderer_info:
                 r_info = adm.renderer_info
-                r_text = f"🎚️ {r_info.get('name', '未知渲染器')}"
+                r_text = self.tr('🎚️ {name}').format(name=r_info.get('name', self.tr('未知渲染器')))
                 if r_info.get('version'):
                     r_text += f" v{r_info['version']}"
                 if r_info.get('coordinate_mode'):
@@ -658,7 +655,7 @@ class LoudnessMeterApp(QMainWindow):
                     r_text += f"\n   URI: {r_info['uri']}"
                 lines.append(r_text)
             else:
-                lines.append("🎚️ 未检测到渲染器信息")
+                lines.append(self.tr("🎚️ 未检测到渲染器信息"))
             
             if adm.authoring_info:
                 a_info = adm.authoring_info
@@ -668,12 +665,12 @@ class LoudnessMeterApp(QMainWindow):
                         a_text += f" v{a_info['authoring_tool_version']}"
                     lines.append(a_text)
                 else:
-                    lines.append("🛠️ 未检测到创作软件")
+                    lines.append(self.tr("🛠️ 未检测到创作软件"))
                 
                 if a_info.get('reference_layout'):
-                    lines.append(f"📐 参考布局: {a_info['reference_layout']}")
+                    lines.append(self.tr('📐 参考布局: {layout}').format(layout=a_info['reference_layout']))
             else:
-                lines.append("🛠️ 未检测到创作软件信息")
+                lines.append(self.tr("🛠️ 未检测到创作软件信息"))
             
             # 显示到UI
             self.adm_info.setPlainText("\n".join(lines))
@@ -701,6 +698,7 @@ class LoudnessMeterApp(QMainWindow):
         scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
 
         panel = QGroupBox(self.tr("📁 输入"))
+        panel.setMinimumWidth(340)
         panel.setStyleSheet("""
             QGroupBox {
                 font-weight: bold;
@@ -824,9 +822,9 @@ class LoudnessMeterApp(QMainWindow):
 
         self.file_meta_labels: Dict[str, QLabel] = {}
         meta_fields = [
-            ('format', '格式'), ('channels', '声道'),
-            ('samplerate', '采样率'), ('bit_depth', '位深'),
-            ('duration', '时长'), ('file_size', '大小'),
+            ('format', self.tr('格式')), ('channels', self.tr('声道')),
+            ('samplerate', self.tr('采样率')), ('bit_depth', self.tr('位深')),
+            ('duration', self.tr('时长')), ('file_size', self.tr('大小')),
         ]
         for i, (key, name) in enumerate(meta_fields):
             row, col = divmod(i, 2)
@@ -867,7 +865,7 @@ class LoudnessMeterApp(QMainWindow):
         cfg_layout = QHBoxLayout()
         cfg_layout.addWidget(QLabel(self.tr("声道配置:")))
         self.config_combo = QComboBox()
-        self.config_combo.addItems(["自动检测", "stereo", "5.1", "7.1", "5.1.4", "7.1.2", "7.1.4"])
+        self.config_combo.addItems([self.tr("自动检测"), "stereo", "5.1", "7.1", "5.1.4", "7.1.2", "7.1.4"])
         self.config_combo.setStyleSheet("""
             QComboBox {
                 background-color: #0f3460;
@@ -993,8 +991,8 @@ class LoudnessMeterApp(QMainWindow):
         ctrl_layout.addWidget(QLabel(self.tr("声道模板:")))
         self.mono_template_combo = QComboBox()
         self.mono_template_combo.addItems([
-            "自动检测", "Stereo (2.0)", "5.1 (6ch)", "7.1 (8ch)",
-            "7.1.2 (10ch)", "5.1.4 (10ch)", "7.1.4 (12ch)", "自定义"
+            self.tr("自动检测"), "Stereo (2.0)", "5.1 (6ch)", "7.1 (8ch)",
+            "7.1.2 (10ch)", "5.1.4 (10ch)", "7.1.4 (12ch)", self.tr("自定义")
         ])
         self.mono_template_combo.setStyleSheet("""
             QComboBox {
@@ -1075,7 +1073,7 @@ class LoudnessMeterApp(QMainWindow):
         mono_files_layout.setContentsMargins(10, 10, 10, 10)
 
         self.mono_files_table = QTableWidget(0, 3)
-        self.mono_files_table.setHorizontalHeaderLabels(['#', '声道', '文件名'])
+        self.mono_files_table.setHorizontalHeaderLabels([self.tr('#'), self.tr('声道'), self.tr('文件名')])
         self.mono_files_table.verticalHeader().setVisible(False)
         self.mono_files_table.horizontalHeader().setStretchLastSection(True)
         self.mono_files_table.setMinimumHeight(180)
@@ -1166,7 +1164,7 @@ class LoudnessMeterApp(QMainWindow):
     def _on_mono_auto_match(self):
         """对当前已加载的文件重新执行自动匹配"""
         if not self.mono_files:
-            QMessageBox.information(self, self.tr("提示"), "请先选择文件")
+            QMessageBox.information(self, self.tr("提示"), self.tr("请先选择文件"))
             return
         template_map = {
             "Stereo (2.0)": "Stereo (2.0)",
@@ -1318,7 +1316,7 @@ class LoudnessMeterApp(QMainWindow):
                     self.on_input_mode_changed('mono')
                     # 这里简化处理：只加载一个文件，让用户继续添加
                     self.current_file = path
-                    self.filename_label.setText(f"✓ {p.name} (请在浏览中添加更多)")
+                    self.filename_label.setText(self.tr("✓ {name} (请在浏览中添加更多)").format(name=p.name))
                     self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #f39c12;")
                     self.path_label.setText(str(p.parent))
                     self._update_file_metadata(path)
@@ -1338,10 +1336,10 @@ class LoudnessMeterApp(QMainWindow):
 
                     return
             except Exception as e:
-                QMessageBox.warning(self, self.tr("文件错误"), f"无法读取文件:\n{e}")
+                QMessageBox.warning(self, self.tr("文件错误"), self.tr("无法读取文件:\n{err}").format(err=e))
                 return
 
-        QMessageBox.warning(self, self.tr("不支持的文件"), f"无法识别该文件类型:\n{p.name}")
+        QMessageBox.warning(self, self.tr("不支持的文件"), self.tr("无法识别该文件类型:\n{name}").format(name=p.name))
 
     
     def _create_center_panel(self):
@@ -1361,20 +1359,20 @@ class LoudnessMeterApp(QMainWindow):
         header_layout.setAlignment(Qt.AlignCenter)
         
         # 咿呀服了吗
-        il_label = QLabel(self.tr("咿了吗"))
-        il_label.setStyleSheet('color: #667eea; font-size: 10px; font-weight: thin; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; letter-spacing: 24px; border: none;')
+        il_label = QLabel(self.tr("Immersive Loudness"))
+        il_label.setStyleSheet('color: #667eea; font-size: 10px; font-weight: thin; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; letter-spacing: 10px; border: none;')
         il_label.setAlignment(Qt.AlignCenter)
         header_layout.addWidget(il_label)
 
         # IL
-        il_label = QLabel('ILM')
+        il_label = QLabel('IL')
         il_label.setStyleSheet('color: #667eea; font-size: 64px; font-weight: bold; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; letter-spacing: 12px; border: none;')
         il_label.setAlignment(Qt.AlignCenter)
         header_layout.addWidget(il_label)
         
         # Immersive Loudness
-        name_label = QLabel('Immersive audiofile Loudness Meter')
-        name_label.setStyleSheet('color: #a0b4e8; font-size: 13px; font-weight: bold; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; letter-spacing: 3px; border: none;')
+        name_label = QLabel('Immersive audio file loudness measure tool')
+        name_label.setStyleSheet('color: #a0b4e8; font-size: 12px; font-weight: bold; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; letter-spacing: 1px; border: none;')
         name_label.setAlignment(Qt.AlignCenter)
         header_layout.addWidget(name_label)
         
@@ -1382,25 +1380,31 @@ class LoudnessMeterApp(QMainWindow):
         bottom_layout = QHBoxLayout()
         bottom_layout.setSpacing(0)
         bottom_layout.setContentsMargins(0, 2, 0, 0)
+        
+        # 左侧三行功能描述
+        left_info = QVBoxLayout()
+        left_info.setSpacing(0)
+        left_info.setAlignment(Qt.AlignLeft | Qt.AlignBottom)
+        for line_text in ["Channel auto-match", "ADM analysis and render", "Excel export"]:
+            lbl = QLabel(line_text)
+            lbl.setStyleSheet('color: #8899cc; font-size: 8px; font-family: "Segoe UI", sans-serif; border: none;')
+            left_info.addWidget(lbl)
+        bottom_layout.addLayout(left_info)
+        
         bottom_layout.addStretch(1)
         
-        cn_label = QLabel(self.tr("沉浸式音频文件响度测量工具"))
-        cn_label.setStyleSheet('color: #8899cc; font-size: 10px; font-family: "Microsoft YaHei", "Segoe UI", sans-serif; letter-spacing: 1px; border: none;')
-        cn_label.setAlignment(Qt.AlignCenter)
-        bottom_layout.addWidget(cn_label)
-        bottom_layout.addStretch(2)
-        
+        # 右侧版本和版权
         right_info = QVBoxLayout()
-        right_info.setSpacing(1)
-        right_info.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        right_info.setSpacing(0)
+        right_info.setAlignment(Qt.AlignRight | Qt.AlignBottom)
         
-        version_label = QLabel('v3.3  (build 260507)')
-        version_label.setStyleSheet('color: #667eea; font-size: 11px; font-weight: bold;')
+        version_label = QLabel('v1.0  (build 260511)')
+        version_label.setStyleSheet('color: #667eea; font-size: 8px; border: none;')
         version_label.setAlignment(Qt.AlignRight)
         right_info.addWidget(version_label)
         
-        copyright_label = QLabel('© 2026 Yuan Xuecheng')
-        copyright_label.setStyleSheet('color: #888; font-size: 8px; border: none;')
+        copyright_label = QLabel('© 2026 YOY')
+        copyright_label.setStyleSheet('color: #888; font-size: 7px; border: none;')
         copyright_label.setAlignment(Qt.AlignRight)
         right_info.addWidget(copyright_label)
         
@@ -1415,9 +1419,13 @@ class LoudnessMeterApp(QMainWindow):
         
         content_layout.addWidget(QLabel(self.tr("响度标准:")))
         self.std_combo = QComboBox()
-        self.std_combo.addItems(list(LOUDNESS_STANDARDS.keys()))
+        self.std_combo.setMaximumWidth(360)
+        self.std_combo.addItem(self.tr("GY/T 282-2014 (中国广电-电视)"), "GY/T 282-2014 (中国广电-电视)")
+        self.std_combo.addItem(self.tr("GY/T 377-2023 (中国广电-网络/嘈杂环境)"), "GY/T 377-2023 (中国广电-网络/嘈杂环境)")
+        self.std_combo.addItem(self.tr("EBU R128 (欧洲广播)"), "EBU R128 (欧洲广播)")
+        self.std_combo.addItem(self.tr("ATSC A/85 (美国电视)"), "ATSC A/85 (美国电视)")
         self.std_combo.currentTextChanged.connect(self.on_std_changed)
-        self.std_combo.setCurrentText("GY/T 282-2014 (中国广电-电视)")
+        self.std_combo.setCurrentIndex(0)
         content_layout.addWidget(self.std_combo)
         
         self.std_info = QLabel()
@@ -1479,11 +1487,14 @@ class LoudnessMeterApp(QMainWindow):
         layout.setSpacing(8)
         
         self.result_table = QTableWidget(5, 2)
-        self.result_table.setHorizontalHeaderLabels(["指标", "数值"])
+        self.result_table.setHorizontalHeaderLabels([self.tr("指标"), self.tr("数值")])
         self.result_table.verticalHeader().setVisible(False)
-        self.result_table.horizontalHeader().setStretchLastSection(True)
+        self.result_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.result_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.result_table.setColumnWidth(0, 170)
+        self.result_table.setColumnWidth(1, 90)
         
-        metrics = ["节目响度(I)", "最大短时响度(S)", "最大瞬时响度(M)", "最大真峰值(TP)", "响度范围(LRA)"]
+        metrics = [self.tr("节目响度(I)"), self.tr("最大短时响度(S)"), self.tr("最大瞬时响度(M)"), self.tr("最大真峰值(TP)"), self.tr("响度范围(LRA)")]
         for i, m in enumerate(metrics):
             self.result_table.setItem(i, 0, QTableWidgetItem(m))
             item = QTableWidgetItem("--")
@@ -1591,14 +1602,19 @@ class LoudnessMeterApp(QMainWindow):
     def update_std_info(self):
         std = self.current_standard
         self.std_info.setText(
-            f"目标: {std.integrated_target:+.1f} LUFS (±{std.integrated_tolerance:.1f} LU)\n"
-            f"峰值: {std.true_peak_limit:+.1f} dBTP"
+            self.tr("目标: {target} LUFS (±{tol} LU)\n峰值: {peak} dBTP")
+            .format(target=f"{std.integrated_target:+.1f}",
+                    tol=f"{std.integrated_tolerance:.1f}",
+                    peak=f"{std.true_peak_limit:+.1f}")
         )
     
-    def on_std_changed(self, name):
-        if name in LOUDNESS_STANDARDS:
-            self.current_standard = LOUDNESS_STANDARDS[name]
-            self.update_std_info()
+    def on_std_changed(self, text):
+        # Reverse map: find original key from translated or raw text
+        for key in LOUDNESS_STANDARDS:
+            if self.tr(key) == text or key == text:
+                self.current_standard = LOUDNESS_STANDARDS[key]
+                self.update_std_info()
+                break
     
     def on_input_mode_changed(self, mode):
         """输入模式切换"""
@@ -1631,7 +1647,7 @@ class LoudnessMeterApp(QMainWindow):
     def _render_and_measure_adm(self):
         """渲染 ADM 文件到目标布局，然后测量响度（后台线程带进度条）"""
         if not self.current_file or not Path(self.current_file).exists():
-            QMessageBox.warning(self, self.tr("提示"), "请先选择 ADM 文件")
+            QMessageBox.warning(self, self.tr("提示"), self.tr("请先选择 ADM 文件"))
             return
 
         target_layout = self.atmos_layout_combo.currentText()
@@ -1639,14 +1655,14 @@ class LoudnessMeterApp(QMainWindow):
         from renderers.ear_renderer import is_object_based_adm
 
         if not is_object_based_adm(self.current_file):
-            QMessageBox.information(self, self.tr("提示"), "该文件不包含动态对象音频，无需渲染。")
+            QMessageBox.information(self, self.tr("提示"), self.tr("该文件不包含动态对象音频，无需渲染。"))
             return
 
         # 禁用渲染按钮防止重复点击
         self.atmos_render_btn.setEnabled(False)
 
         # 显示渲染进度条
-        self.render_step_label.setText(f"🎧 正在渲染到 {target_layout}...")
+        self.render_step_label.setText(self.tr("🎧 正在渲染到 {layout}...").format(layout=target_layout))
         self.render_step_label.setVisible(True)
         self.render_progress.setValue(0)
         self.render_progress.setVisible(True)
@@ -1673,7 +1689,7 @@ class LoudnessMeterApp(QMainWindow):
         self.on_input_mode_changed('standard')
         self.current_file = output_path
         p = Path(output_path)
-        self.filename_label.setText(f"✓ 渲染: {p.name}")
+        self.filename_label.setText(self.tr("✓ 渲染: {name}").format(name=p.name))
         self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #9b59b6;")
         self.path_label.setText(str(p.parent))
         self._update_file_metadata(output_path)
@@ -1693,7 +1709,7 @@ class LoudnessMeterApp(QMainWindow):
         self.render_progress.setValue(0)
         self.render_progress.setVisible(False)
         self.atmos_render_btn.setEnabled(True)
-        QMessageBox.critical(self, self.tr("渲染失败"), f"渲染过程中出错:\n{error_msg}")
+        QMessageBox.critical(self, self.tr("渲染失败"), self.tr("渲染过程中出错:\n{err}").format(err=error_msg))
 
     def browse(self):
         """浏览文件"""
@@ -1705,7 +1721,7 @@ class LoudnessMeterApp(QMainWindow):
         elif self.btn_adm.isChecked():
             mode = 'adm'
         else:
-            QMessageBox.warning(self, self.tr("提示"), "请先选择输入方式")
+            QMessageBox.warning(self, self.tr("提示"), self.tr("请先选择输入方式"))
             return
         
         if mode == 'standard':  # 单个多声道文件
@@ -1761,7 +1777,7 @@ class LoudnessMeterApp(QMainWindow):
                     skipped.append(f"{Path(path).name}: {e}")
 
             if skipped:
-                QMessageBox.information(self, self.tr("跳过文件"), "以下文件不是单声道或无法读取:\n" + "\n".join(skipped[:10]))
+                QMessageBox.information(self, self.tr("跳过文件"), self.tr("以下文件不是单声道或无法读取:\n{files}").format(files="\n".join(skipped[:10])))
 
             if not valid_files:
                 return
@@ -1781,7 +1797,7 @@ class LoudnessMeterApp(QMainWindow):
 
             if self.mono_files:
                 p = Path(self.mono_files[0][0])
-                self.filename_label.setText(f"✓ {len(self.mono_files)}个单声道文件")
+                self.filename_label.setText(self.tr("✓ {count} 个单声道文件").format(count=len(self.mono_files)))
                 self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #27ae60;")
                 self.path_label.setText(str(p.parent))
 
@@ -1813,13 +1829,13 @@ class LoudnessMeterApp(QMainWindow):
                     parser.parse()
                     input_data = parser
                 except Exception as e:
-                    QMessageBox.critical(self, self.tr("ADM错误"), str(e))
+                    QMessageBox.critical(self, self.tr("ADM错误"), self.tr("ADM 错误: {err}").format(err=str(e)))
                     return
         elif self.btn_mono.isChecked() and self.mono_files:
             input_mode = 'mono_list'
             input_data = self.mono_files
         else:
-            QMessageBox.warning(self, self.tr("提示"), "请先选择输入文件")
+            QMessageBox.warning(self, self.tr("提示"), self.tr("请先选择输入文件"))
             return
         
         # 获取当前声道配置和标准
@@ -1855,7 +1871,8 @@ class LoudnessMeterApp(QMainWindow):
     def on_progress(self, pct, current, total, speed, eta_str):
         self.progress.setValue(pct)
         if speed > 0:
-            self.process_info.setText(f"{current:.1f}s/{total:.1f}s | ⚡{speed:.1f}x实时 | {eta_str}")
+            self.process_info.setText(self.tr("{current:.1f}s/{total:.1f}s | ⚡{speed:.1f}x 实时 | {eta}")
+                .format(current=current, total=total, speed=speed, eta=eta_str))
         else:
             self.process_info.setText(f"{current:.1f}s/{total:.1f}s | {eta_str}")
     
@@ -1887,13 +1904,13 @@ class LoudnessMeterApp(QMainWindow):
         int_ok = std.check_integrated(results['integrated'])
         tp_ok = std.check_true_peak(results['true_peak'])
         
-        self.int_status.setText(f"节目响度: {'✓' if int_ok else '✗'}")
+        self.int_status.setText(self.tr("节目响度: {status}").format(status=('✓' if int_ok else '✗')))
         self.int_status.setStyleSheet(f"background-color: {'#27ae60' if int_ok else '#e74c3c'}; color: white; padding: 4px; border-radius: 4px;")
         
-        self.tp_status.setText(f"峰值: {'✓' if tp_ok else '✗'}")
+        self.tp_status.setText(self.tr("峰值: {status}").format(status=('✓' if tp_ok else '✗')))
         self.tp_status.setStyleSheet(f"background-color: {'#27ae60' if tp_ok else '#e74c3c'}; color: white; padding: 4px; border-radius: 4px;")
         
-        self.status.setText(f"完成 | 用时{results.get('processing_time', 0):.1f}s")
+        self.status.setText(self.tr("完成 | 用时 {time:.1f}s").format(time=results.get('processing_time', 0)))
         self.export_txt_btn.setEnabled(True)
         self.export_json_btn.setEnabled(True)
         self.export_excel_btn.setEnabled(True)
@@ -1932,7 +1949,7 @@ class LoudnessMeterApp(QMainWindow):
         elif self.btn_mono.isChecked() and self.mono_files:
             info['mode'] = 'mono'
             info['file_path'] = str(Path(self.mono_files[0][0]).parent)
-            info['file_name'] = f"{len(self.mono_files)}个单声道文件"
+            info['file_name'] = self.tr("{count} 个单声道文件").format(count=len(self.mono_files))
             info['mono_files'] = [
                 {'path': path, 'channel': ch, 'name': Path(path).name}
                 for path, ch in self.mono_files
@@ -2028,10 +2045,10 @@ class LoudnessMeterApp(QMainWindow):
                 elif fmt == 'json':
                     exporter.export_json(path)
             
-            self.status.setText(f"已导出: {Path(path).name}")
+            self.status.setText(self.tr("已导出: {name}").format(name=Path(path).name))
             
         except Exception as e:
-            QMessageBox.critical(self, self.tr("导出失败"), str(e))
+            QMessageBox.critical(self, self.tr("导出失败"), self.tr("导出失败: {err}").format(err=str(e)))
     
     def _export_excel_detailed(self, path: str, opts: dict):
         """导出详细Excel报告 (.xlsx)
@@ -2045,7 +2062,7 @@ class LoudnessMeterApp(QMainWindow):
             import openpyxl
             from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
         except ImportError:
-            QMessageBox.warning(self, self.tr("缺少依赖"), "请安装 openpyxl: pip install openpyxl")
+            QMessageBox.warning(self, self.tr("缺少依赖"), self.tr("请安装 openpyxl: pip install openpyxl"))
             return
         
         detailed = self.current_results.get('detailed_data')
@@ -2269,12 +2286,12 @@ class LoudnessMeterApp(QMainWindow):
         # === 每秒最大真峰值 ===
         if detailed and detailed.get('true_peak_per_second'):
             ws.merge_cells(f'A{row}:D{row}')
-            cell = ws.cell(row=row, column=1, value='每秒最大真峰值')
+            cell = ws.cell(row=row, column=1, value=self.tr('每秒最大真峰值'))
             cell.font = title_font
             cell.alignment = Alignment(horizontal='left', vertical='center')
             row += 2
             
-            tp_headers = ['时间(秒)', '真峰值(dBTP)', '标准限值', '状态']
+            tp_headers = [self.tr('时间(秒)'), self.tr('真峰值(dBTP)'), self.tr('标准限值'), self.tr('状态')]
             for col, header in enumerate(tp_headers, 1):
                 cell = ws.cell(row=row, column=col, value=header)
                 cell.font = header_font
@@ -2332,14 +2349,129 @@ def _get_resource_path(relative_path):
     return Path(__file__).parent.parent / relative_path
 
 
+def _show_splash(app):
+    """显示启动画面，覆盖程序初始化时间"""
+    from PySide6.QtWidgets import QSplashScreen
+    from PySide6.QtGui import QPixmap, QPainter, QFont, QColor, QFontMetrics
+    from PySide6.QtCore import Qt
+    
+    pixmap = QPixmap(420, 280)
+    pixmap.fill(QColor("#0f0f23"))
+    
+    painter = QPainter(pixmap)
+    # 边框
+    painter.setPen(QColor("#667eea"))
+    painter.setBrush(Qt.NoBrush)
+    painter.drawRoundedRect(10, 10, 400, 260, 12, 12)
+    
+    # IL 大字
+    painter.setPen(QColor("#667eea"))
+    painter.setFont(QFont("Segoe UI", 56, QFont.Bold))
+    fm = QFontMetrics(painter.font())
+    text = "IL"
+    x = (pixmap.width() - fm.horizontalAdvance(text)) // 2
+    painter.drawText(x, 110, text)
+    
+    # Immersive Loudness
+    painter.setPen(QColor("#a0b4e8"))
+    painter.setFont(QFont("Segoe UI", 14, QFont.Bold))
+    fm = QFontMetrics(painter.font())
+    text = "Immersive Loudness"
+    x = (pixmap.width() - fm.horizontalAdvance(text)) // 2
+    painter.drawText(x, 150, text)
+    
+    # 版本号
+    painter.setPen(QColor("#667eea"))
+    painter.setFont(QFont("Segoe UI", 10))
+    fm = QFontMetrics(painter.font())
+    text = "v1.0  (build 260511)"
+    x = (pixmap.width() - fm.horizontalAdvance(text)) // 2
+    painter.drawText(x, 180, text)
+    
+    # Loading...
+    painter.setPen(QColor("#8899cc"))
+    painter.setFont(QFont("Segoe UI", 9))
+    fm = QFontMetrics(painter.font())
+    text = "Loading..."
+    x = (pixmap.width() - fm.horizontalAdvance(text)) // 2
+    painter.drawText(x, 230, text)
+    
+    painter.end()
+    
+    splash = QSplashScreen(pixmap, Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
+    splash.show()
+    app.processEvents()
+    return splash
+
+
 def main():
-    app = QApplication(sys.argv)
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--lang', default=None, help='Force language, e.g. en, zh')
+    args, remaining = parser.parse_known_args()
+    
+    app = QApplication([sys.argv[0]] + remaining)
     app.setStyle('Fusion')
+    
+    # 显示启动画面（必须在重模块导入之前，让用户立刻看到反馈）
+    splash = _show_splash(app)
+    
+    # 延迟导入重模块，减少启动前等待时间
+    global sf, np, ITU1770Meter, ChannelConfig, LoudnessResults, ReportExporter, BW64Parser, is_adm_file
+    import soundfile as sf
+    import numpy as np
+    from itu1770_meter import ITU1770Meter, ChannelConfig
+    from report_exporter import LoudnessResults, ReportExporter
+    from adm_parser import BW64Parser, is_adm_file
+    
+    # i18n: auto-detect system locale and load translation if available
+    from PySide6.QtCore import QTranslator, QLocale
+    translator = QTranslator()
+    
+    if args.lang:
+        # 强制指定语言
+        qm_path = _get_resource_path(f'i18n/ImmersiveLoudness_{args.lang}.qm')
+        if not qm_path.exists():
+            # 尝试加上地区后缀
+            qm_path = _get_resource_path(f'i18n/ImmersiveLoudness_{args.lang}_US.qm')
+    else:
+        # 跨平台读取系统显示语言
+        locale_name = QLocale.system().name()
+        try:
+            if sys.platform == 'win32':
+                import ctypes
+                import locale as py_locale
+                lang_id = ctypes.windll.kernel32.GetUserDefaultUILanguage()
+                locale_name = py_locale.windows_locale.get(lang_id, locale_name)
+            elif sys.platform == 'darwin':
+                # macOS: 读取 AppleLanguages
+                import subprocess
+                import ast
+                result = subprocess.run(
+                    ['defaults', 'read', '-g', 'AppleLanguages'],
+                    capture_output=True, text=True, check=True
+                )
+                langs = ast.literal_eval(result.stdout.strip())
+                if langs:
+                    locale_name = langs[0].replace('-', '_')
+        except Exception:
+            pass
+        qm_path = _get_resource_path(f'i18n/ImmersiveLoudness_{locale_name}.qm')
+        if not qm_path.exists() and '_' in locale_name:
+            # fallback to language code only, e.g. "en" from "en_US"
+            lang = locale_name.split('_')[0]
+            qm_path = _get_resource_path(f'i18n/ImmersiveLoudness_{lang}.qm')
+    
+    if qm_path.exists():
+        if translator.load(str(qm_path)):
+            app.installTranslator(translator)
+    
     icon_path = _get_resource_path('assets/icon.ico')
     if icon_path.exists():
         from PySide6.QtGui import QIcon
         app.setWindowIcon(QIcon(str(icon_path)))
     win = LoudnessMeterApp()
+    splash.finish(win)
     win.show()
     sys.exit(app.exec())
 
