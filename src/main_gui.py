@@ -217,21 +217,21 @@ class DetailedMeasurementWorker(QThread):
             self.process_start_time = time.time()  # 记录处理开始时间
             
             # === 阶段3: 响度测量 (20-90%) ===
-            # 使用回调函数获取进度
-            def on_process_progress(current_block, total_blocks):
+            # 使用回调函数获取进度（适配新版 ITU1770Meter 的进度报告）
+            def on_process_progress(step_name, overall_progress_pct):
                 # 20-90% 区间映射
-                progress_pct = 20 + (current_block / total_blocks) * 70
+                progress_pct = 20 + overall_progress_pct * 0.7
                 
-                # 计算实时处理倍速
+                # 计算实时处理倍速（按进度百分比推算已处理时长）
                 speed_str = ""
                 if self.process_start_time and self.audio_duration > 0:
                     elapsed = time.time() - self.process_start_time
-                    processed_time = (current_block / total_blocks) * self.audio_duration
+                    processed_time = (overall_progress_pct / 100.0) * self.audio_duration
                     if elapsed > 0 and processed_time > 0:
                         speed_ratio = processed_time / elapsed
                         speed_str = self.tr(" | ⚡{ratio:.1f}x 实时").format(ratio=speed_ratio)
                 
-                self.sub_step.emit(self.tr("测量中... {current_block}/{total_blocks} 块{speed_str}").format(current_block=current_block, total_blocks=total_blocks, speed_str=speed_str), int(progress_pct))
+                self.sub_step.emit(f"{step_name}{speed_str}", int(progress_pct))
             
             result = meter.process_audio(audio, sr, progress_callback=on_process_progress)
             
