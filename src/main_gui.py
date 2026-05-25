@@ -1371,7 +1371,7 @@ class LoudnessMeterApp(QMainWindow):
         header_layout.addWidget(il_label)
         
         # Immersive Loudness
-        name_label = QLabel('Immersive audio file loudness measure tool')
+        name_label = QLabel('Immersive audio file Loudness measure tool')
         name_label.setStyleSheet('color: #a0b4e8; font-size: 12px; font-weight: bold; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; letter-spacing: 1px; border: none;')
         name_label.setAlignment(Qt.AlignCenter)
         header_layout.addWidget(name_label)
