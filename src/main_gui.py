@@ -734,7 +734,7 @@ class LoudnessMeterApp(QMainWindow):
         self.mode_button_group = QButtonGroup(self)
         self.mode_button_group.setExclusive(True)
 
-        self.btn_file = QPushButton(self.tr("📁 WAV音频文件"))
+        self.btn_file = QPushButton(self.tr("📁 WAV"))
         self.btn_adm = QPushButton("📦 ADM/BW64")
 
         for btn in (self.btn_file, self.btn_adm):
@@ -772,7 +772,7 @@ class LoudnessMeterApp(QMainWindow):
             }
             QPushButton:hover { background-color: #764ba2; }
         """
-        self._update_mode_buttons('mono')
+        self._update_mode_buttons('file')
 
         # === 2. 文件信息卡片 ===
         # === 2. 文件信息卡片（单个多声道/ADM 模式显示） ===
@@ -1842,6 +1842,8 @@ class LoudnessMeterApp(QMainWindow):
                     self.config_combo.setCurrentText(cfg_map[matched_count])
 
                 self._update_mono_files_list()
+                # 刷新 UI 显隐，确保 mono_section 正确显示
+                self._update_mode_ui('file')
 
         elif mode == 'adm':  # ADM
             path, _ = QFileDialog.getOpenFileName(
