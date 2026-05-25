@@ -734,7 +734,7 @@ class LoudnessMeterApp(QMainWindow):
         self.mode_button_group = QButtonGroup(self)
         self.mode_button_group.setExclusive(True)
 
-        self.btn_file = QPushButton(self.tr("📁 打开文件"))
+        self.btn_file = QPushButton(self.tr("📁 WAV音频文件"))
         self.btn_adm = QPushButton("📦 ADM/BW64")
 
         for btn in (self.btn_file, self.btn_adm):
@@ -1715,9 +1715,9 @@ class LoudnessMeterApp(QMainWindow):
         self.render_progress.setValue(100)
         self.atmos_render_btn.setEnabled(True)
 
-        # 切换到单个多声道模式，加载渲染后的文件
-        self.btn_standard.setChecked(True)
-        self.on_input_mode_changed('standard')
+        # 切换到文件模式，加载渲染后的文件
+        self.btn_file.setChecked(True)
+        self.on_input_mode_changed('file')
         self.current_file = output_path
         p = Path(output_path)
         self.filename_label.setText(self.tr("✓ 渲染: {name}").format(name=p.name))
@@ -1782,9 +1782,9 @@ class LoudnessMeterApp(QMainWindow):
                     return
 
                 # 普通多声道文件
+                self.on_input_mode_changed('file')
                 self.current_file = path
                 self.mono_files = None
-                self.on_input_mode_changed('file')
                 self.filename_label.setText(f"✓ {p.name}")
                 self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #27ae60;")
                 self.path_label.setText(str(p.parent))
@@ -1816,9 +1816,9 @@ class LoudnessMeterApp(QMainWindow):
                         return
 
                 # 进入多单声道模式
+                self.on_input_mode_changed('file')
                 self.current_file = None
                 self.mono_files = [(p, '?') for p in files]
-                self.on_input_mode_changed('file')
                 self.filename_label.setText(self.tr("✓ {count} 个单声道文件").format(count=len(files)))
                 self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #27ae60;")
                 self.path_label.setText(str(Path(files[0]).parent))
@@ -1983,19 +1983,7 @@ class LoudnessMeterApp(QMainWindow):
             'mono_files': []
         }
         
-        if self.btn_standard.isChecked() and self.current_file:
-            info['mode'] = 'standard'
-            info['file_path'] = str(Path(self.current_file).parent)
-            info['file_name'] = Path(self.current_file).name
-            
-        elif self.btn_adm.isChecked() and self.current_file:
-            info['mode'] = 'adm'
-            info['file_path'] = str(Path(self.current_file).parent)
-            info['file_name'] = Path(self.current_file).name
-            if hasattr(self, 'adm_info'):
-                info['adm_info'] = self.adm_info.toPlainText()
-                
-        elif self.btn_mono.isChecked() and self.mono_files:
+        if self.mono_files:
             info['mode'] = 'mono'
             info['file_path'] = str(Path(self.mono_files[0][0]).parent)
             info['file_name'] = self.tr("{count} 个单声道文件").format(count=len(self.mono_files))
@@ -2003,17 +1991,27 @@ class LoudnessMeterApp(QMainWindow):
                 {'path': path, 'channel': ch, 'name': Path(path).name}
                 for path, ch in self.mono_files
             ]
+        elif self.btn_adm.isChecked() and self.current_file:
+            info['mode'] = 'adm'
+            info['file_path'] = str(Path(self.current_file).parent)
+            info['file_name'] = Path(self.current_file).name
+            if hasattr(self, 'adm_info'):
+                info['adm_info'] = self.adm_info.toPlainText()
+        elif self.current_file:
+            info['mode'] = 'file'
+            info['file_path'] = str(Path(self.current_file).parent)
+            info['file_name'] = Path(self.current_file).name
         
         return info
     
     def _get_export_base_name(self) -> str:
         """生成导出文件名基础部分（取自被测文件共有名）"""
-        if self.btn_standard.isChecked() and self.current_file:
-            return Path(self.current_file).stem
+        if self.mono_files:
+            stems = [Path(p).stem for p, _ in self.mono_files]
         elif self.btn_adm.isChecked() and self.current_file:
             return Path(self.current_file).stem
-        elif self.btn_mono.isChecked() and self.mono_files:
-            stems = [Path(p).stem for p, _ in self.mono_files]
+        elif self.current_file:
+            return Path(self.current_file).stem
             if not stems:
                 return "report"
             # 求共有前缀
