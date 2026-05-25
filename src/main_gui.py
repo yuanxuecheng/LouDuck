@@ -734,21 +734,18 @@ class LoudnessMeterApp(QMainWindow):
         self.mode_button_group = QButtonGroup(self)
         self.mode_button_group.setExclusive(True)
 
-        self.btn_mono = QPushButton(self.tr("🎵 多单声道"))
-        self.btn_standard = QPushButton(self.tr("📁 单个多声道"))
+        self.btn_file = QPushButton(self.tr("📁 打开文件"))
         self.btn_adm = QPushButton("📦 ADM/BW64")
 
-        for btn in (self.btn_mono, self.btn_standard, self.btn_adm):
+        for btn in (self.btn_file, self.btn_adm):
             btn.setCheckable(True)
             btn.setCursor(Qt.PointingHandCursor)
             self.mode_button_group.addButton(btn)
 
-        self.btn_mono.clicked.connect(lambda: self.on_input_mode_changed('mono'))
-        self.btn_standard.clicked.connect(lambda: self.on_input_mode_changed('standard'))
+        self.btn_file.clicked.connect(lambda: self.on_input_mode_changed('file'))
         self.btn_adm.clicked.connect(lambda: self.on_input_mode_changed('adm'))
 
-        mode_layout.addWidget(self.btn_mono)
-        mode_layout.addWidget(self.btn_standard)
+        mode_layout.addWidget(self.btn_file)
         mode_layout.addWidget(self.btn_adm)
         layout.addWidget(mode_group)
 
@@ -835,6 +832,12 @@ class LoudnessMeterApp(QMainWindow):
             meta_layout.addWidget(lbl_name, row, col * 2)
             meta_layout.addWidget(lbl_val, row, col * 2 + 1)
         file_layout.addWidget(meta_widget)
+
+        # 声道顺序展示
+        self.channel_order_label = QLabel(self.tr("声道顺序: -"))
+        self.channel_order_label.setStyleSheet("color: #aaa; font-size: 11px; padding: 2px;")
+        self.channel_order_label.setWordWrap(True)
+        file_layout.addWidget(self.channel_order_label)
 
         # === 浏览按钮（永久显示） ===
         browse_btn = QPushButton(self.tr("浏览..."))
@@ -1136,27 +1139,27 @@ class LoudnessMeterApp(QMainWindow):
 
     def _update_mode_buttons(self, active_mode: str):
         """更新输入模式按钮样式"""
-        self.btn_mono.setStyleSheet(
-            self._mode_style_active if active_mode == 'mono' else self._mode_style_default
-        )
-        self.btn_standard.setStyleSheet(
-            self._mode_style_active if active_mode == 'standard' else self._mode_style_default
+        self.btn_file.setStyleSheet(
+            self._mode_style_active if active_mode == 'file' else self._mode_style_default
         )
         self.btn_adm.setStyleSheet(
             self._mode_style_active if active_mode == 'adm' else self._mode_style_default
         )
 
-        self.btn_mono.setChecked(active_mode == 'mono')
-        self.btn_standard.setChecked(active_mode == 'standard')
+        self.btn_file.setChecked(active_mode == 'file')
         self.btn_adm.setChecked(active_mode == 'adm')
 
     def _update_mode_ui(self, mode: str):
         """根据模式切换左侧各区块显隐"""
-        self.standard_section.setVisible(mode == 'standard')
+        # 'file' 模式下根据是否加载了 mono_files 决定显示标准区域还是单声道区域
+        is_file_mode = (mode == 'file')
+        is_mono = is_file_mode and bool(self.mono_files)
+        self.standard_section.setVisible(is_file_mode and not is_mono)
+        self.mono_section.setVisible(is_mono)
         self.adm_section.setVisible(mode == 'adm')
-        self.mono_section.setVisible(mode == 'mono')
         if hasattr(self, 'file_info_group'):
-            self.file_info_group.setVisible(mode != 'mono')
+            # file 和 adm 模式都显示文件信息
+            self.file_info_group.setVisible(mode in ('file', 'adm'))
 
     # ---------- 多单声道控制方法 ----------
 
@@ -1233,11 +1236,52 @@ class LoudnessMeterApp(QMainWindow):
         self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #667eea;")
         self.path_label.setText("")
 
+    def _update_channel_order(self, path: str):
+        """读取并显示文件内部声道顺序"""
+        try:
+            info = sf.info(path)
+            channels = info.channels
+            channel_names = []
+
+            # 尝试从 soundfile extra_info 解析 Channel Mask
+            try:
+                with sf.SoundFile(path) as f:
+                    extra = f.extra_info
+                    import re
+                    m = re.search(r'Channel Mask\s*:\s*0x[0-9A-Fa-f]+\s*\(([^)]+)\)', extra)
+                    if m:
+                        channel_names = [c.strip() for c in m.group(1).split(',')]
+            except Exception:
+                pass
+
+            # 若解析失败，使用默认配置
+            if not channel_names and channels > 0:
+                default_map = {
+                    1: ['M'],
+                    2: ['L', 'R'],
+                    6: ['L', 'R', 'C', 'LFE', 'Ls', 'Rs'],
+                    8: ['L', 'R', 'C', 'LFE', 'Lss', 'Rss', 'Lrs', 'Rrs'],
+                    10: ['L', 'R', 'C', 'LFE', 'Ls', 'Rs', 'Ltf', 'Rtf', 'Ltr', 'Rtr'],
+                    12: ['L', 'R', 'C', 'LFE', 'Lss', 'Rss', 'Lrs', 'Rrs', 'Ltf', 'Rtf', 'Ltb', 'Rtb'],
+                }
+                channel_names = default_map.get(channels, [f'Ch{i+1}' for i in range(channels)])
+
+            order_text = ' → '.join(channel_names[:channels])
+            self.channel_order_label.setText(self.tr("声道顺序: {order}").format(order=order_text))
+            self.channel_order_label.setStyleSheet("color: #27ae60; font-size: 11px; font-weight: bold; padding: 2px;")
+        except Exception as e:
+            print(f"[声道顺序读取失败] {e}")
+            self.channel_order_label.setText(self.tr("声道顺序: -"))
+            self.channel_order_label.setStyleSheet("color: #aaa; font-size: 11px; padding: 2px;")
+
     def _clear_file_metadata(self):
         """清空文件元数据显示"""
         for lbl in self.file_meta_labels.values():
             lbl.setText("-")
             lbl.setStyleSheet("color: #eee; font-size: 11px; font-weight: bold;")
+        if hasattr(self, 'channel_order_label'):
+            self.channel_order_label.setText(self.tr("声道顺序: -"))
+            self.channel_order_label.setStyleSheet("color: #aaa; font-size: 11px; padding: 2px;")
 
     def _update_file_metadata(self, path: str):
         """读取并显示文件元数据"""
@@ -1309,31 +1353,20 @@ class LoudnessMeterApp(QMainWindow):
         if ext in ('.wav', '.flac', '.mp3', '.ogg'):
             try:
                 info = sf.info(path)
-                if info.channels == 1:
-                    # 单声道文件拖到主窗口 -> 触发多单声道对话框
-                    self.btn_mono.setChecked(True)
-                    self.on_input_mode_changed('mono')
-                    # 这里简化处理：只加载一个文件，让用户继续添加
-                    self.current_file = path
-                    self.filename_label.setText(self.tr("✓ {name} (请在浏览中添加更多)").format(name=p.name))
-                    self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #f39c12;")
-                    self.path_label.setText(str(p.parent))
-                    self._update_file_metadata(path)
-                    return
-                else:
-                    self.btn_standard.setChecked(True)
-                    self.on_input_mode_changed('standard')
-                    self.current_file = path
-                    self.filename_label.setText(f"✓ {p.name}")
-                    self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #27ae60;")
-                    self.path_label.setText(str(p.parent))
-                    self._update_file_metadata(path)
+                self.btn_file.setChecked(True)
+                self.on_input_mode_changed('file')
+                self.current_file = path
+                self.mono_files = None
+                self.filename_label.setText(f"✓ {p.name}")
+                self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #27ae60;")
+                self.path_label.setText(str(p.parent))
+                self._update_file_metadata(path)
+                self._update_channel_order(path)
 
-                    cfg_map = {2: 'stereo', 6: '5.1', 8: '7.1', 10: '5.1.4', 12: '7.1.4'}
-                    if info.channels in cfg_map:
-                        self.config_combo.setCurrentText(cfg_map[info.channels])
-
-                    return
+                cfg_map = {2: 'stereo', 6: '5.1', 8: '7.1', 10: '5.1.4', 12: '7.1.4'}
+                if info.channels in cfg_map:
+                    self.config_combo.setCurrentText(cfg_map[info.channels])
+                return
             except Exception as e:
                 QMessageBox.warning(self, self.tr("文件错误"), self.tr("无法读取文件:\n{err}").format(err=e))
                 return
@@ -1623,15 +1656,14 @@ class LoudnessMeterApp(QMainWindow):
         self.mono_files = None
         self.current_adm_parser = None
 
-        # 文件信息框：仅单个多声道/ADM模式显示
-        if hasattr(self, 'file_info_group'):
-            self.file_info_group.setVisible(mode != 'mono')
         if hasattr(self, 'filename_label'):
             self.filename_label.setText(self.tr("未选择文件"))
             self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #667eea;")
         if hasattr(self, 'path_label'):
             self.path_label.setText("")
         self._clear_file_metadata()
+        if hasattr(self, 'channel_order_label'):
+            self.channel_order_label.setText(self.tr("声道顺序: -"))
 
         if hasattr(self, 'adm_info'):
             self.adm_info.clear()
@@ -1713,32 +1745,103 @@ class LoudnessMeterApp(QMainWindow):
     def browse(self):
         """浏览文件"""
         # 确定当前模式
-        if self.btn_mono.isChecked():
-            mode = 'mono'
-        elif self.btn_standard.isChecked():
-            mode = 'standard'
-        elif self.btn_adm.isChecked():
+        if self.btn_adm.isChecked():
             mode = 'adm'
+        elif self.btn_file.isChecked():
+            mode = 'file'
         else:
             QMessageBox.warning(self, self.tr("提示"), self.tr("请先选择输入方式"))
             return
-        
-        if mode == 'standard':  # 单个多声道文件
-            path, _ = QFileDialog.getOpenFileName(
-                self, "选择音频", "", "音频 (*.wav *.flac *.mp3 *.ogg)"
+
+        if mode == 'file':
+            files, _ = QFileDialog.getOpenFileNames(
+                self, self.tr("选择音频文件"), "", "音频 (*.wav *.flac *.mp3 *.ogg)"
             )
-            if path:
-                self.current_file = path
+            if not files:
+                return
+
+            if len(files) == 1:
+                # 单个文件：判断是 ADM 还是普通多声道
+                path = files[0]
                 p = Path(path)
+                try:
+                    info = sf.info(path)
+                except Exception as e:
+                    QMessageBox.critical(self, self.tr("错误"), self.tr("无法读取文件: {err}").format(err=str(e)))
+                    return
+
+                # 检查是否为 ADM/BW64（优先）
+                if is_adm_file(path):
+                    self.on_input_mode_changed('adm')
+                    self.current_file = path
+                    self.filename_label.setText(f"✓ ADM: {p.name}")
+                    self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #e74c3c;")
+                    self.path_label.setText(str(p.parent))
+                    self._update_file_metadata(path)
+                    self.parse_and_display_adm(path)
+                    return
+
+                # 普通多声道文件
+                self.current_file = path
+                self.mono_files = None
+                self.on_input_mode_changed('file')
                 self.filename_label.setText(f"✓ {p.name}")
                 self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #27ae60;")
                 self.path_label.setText(str(p.parent))
                 self._update_file_metadata(path)
-
-                info = sf.info(path)
+                self._update_channel_order(path)
                 cfg_map = {2: 'stereo', 6: '5.1', 8: '7.1', 10: '5.1.4', 12: '7.1.4'}
                 if info.channels in cfg_map:
                     self.config_combo.setCurrentText(cfg_map[info.channels])
+
+            else:
+                # 多个文件：强制要求所有文件都是单声道 WAV
+                for path in files:
+                    try:
+                        info = sf.info(path)
+                    except Exception as e:
+                        QMessageBox.critical(self, self.tr("错误"), self.tr("无法读取文件 {name}: {err}").format(name=Path(path).name, err=str(e)))
+                        return
+                    if info.channels != 1:
+                        QMessageBox.critical(
+                            self, self.tr("声道错误"),
+                            self.tr("文件 {name} 不是单声道（{ch} 声道）。\n\n多文件模式要求所有文件必须是单声道。").format(name=Path(path).name, ch=info.channels)
+                        )
+                        return
+                    if Path(path).suffix.lower() != '.wav':
+                        QMessageBox.critical(
+                            self, self.tr("格式错误"),
+                            self.tr("文件 {name} 不是 WAV 格式。\n\n多文件模式仅支持 WAV。").format(name=Path(path).name)
+                        )
+                        return
+
+                # 进入多单声道模式
+                self.current_file = None
+                self.mono_files = [(p, '?') for p in files]
+                self.on_input_mode_changed('file')
+                self.filename_label.setText(self.tr("✓ {count} 个单声道文件").format(count=len(files)))
+                self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #27ae60;")
+                self.path_label.setText(str(Path(files[0]).parent))
+
+                # 自动匹配声道
+                template_map = {
+                    "Stereo (2.0)": "Stereo (2.0)",
+                    "5.1 (6ch)": "5.1 (6ch)",
+                    "7.1 (8ch)": "7.1 (8ch)",
+                    "7.1.2 (10ch)": "7.1.2 (10ch)",
+                    "5.1.4 (10ch)": "5.1.4 (10ch)",
+                    "7.1.4 (12ch)": "7.1.4 (12ch)",
+                }
+                combo_text = self.mono_template_combo.currentText()
+                template_name = template_map.get(combo_text, None)
+                self.mono_files = auto_match_mono_files(files, template_name=template_name)
+
+                cfg_map = {2: 'stereo', 6: '5.1', 8: '7.1', 10: '5.1.4', 12: '7.1.4'}
+                matched_count = sum(1 for _, ch in self.mono_files if ch != '?')
+                if matched_count in cfg_map:
+                    self.config_combo.setCurrentText(cfg_map[matched_count])
+
+                self._update_mono_files_list()
 
         elif mode == 'adm':  # ADM
             path, _ = QFileDialog.getOpenFileName(
@@ -1751,71 +1854,18 @@ class LoudnessMeterApp(QMainWindow):
                 self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #e74c3c;")
                 self.path_label.setText(str(p.parent))
                 self._update_file_metadata(path)
-
-                # 立即解析ADM并显示信息
                 self.parse_and_display_adm(path)
-
-        elif mode == 'mono':  # 多单声道 — 直接选择文件 + 自动匹配
-            files, _ = QFileDialog.getOpenFileNames(
-                self, "选择单声道WAV文件", "", "WAV文件 (*.wav)"
-            )
-            if not files:
-                return
-
-            # 过滤非单声道
-            valid_files = []
-            skipped = []
-            for path in files:
-                try:
-                    info = sf.info(path)
-                    if info.channels == 1:
-                        valid_files.append(path)
-                    else:
-                        skipped.append(f"{Path(path).name} ({info.channels}ch)")
-                except Exception as e:
-                    skipped.append(f"{Path(path).name}: {e}")
-
-            if skipped:
-                QMessageBox.information(self, self.tr("跳过文件"), self.tr("以下文件不是单声道或无法读取:\n{files}").format(files="\n".join(skipped[:10])))
-
-            if not valid_files:
-                return
-
-            # 自动匹配
-            template_map = {
-                "Stereo (2.0)": "Stereo (2.0)",
-                "5.1 (6ch)": "5.1 (6ch)",
-                "7.1 (8ch)": "7.1 (8ch)",
-                "7.1.2 (10ch)": "7.1.2 (10ch)",
-                "5.1.4 (10ch)": "5.1.4 (10ch)",
-                "7.1.4 (12ch)": "7.1.4 (12ch)",
-            }
-            combo_text = self.mono_template_combo.currentText()
-            template_name = template_map.get(combo_text, None)
-            self.mono_files = auto_match_mono_files(valid_files, template_name=template_name)
-
-            if self.mono_files:
-                p = Path(self.mono_files[0][0])
-                self.filename_label.setText(self.tr("✓ {count} 个单声道文件").format(count=len(self.mono_files)))
-                self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #27ae60;")
-                self.path_label.setText(str(p.parent))
-
-                cfg_map = {2: 'stereo', 6: '5.1', 8: '7.1', 10: '5.1.4', 12: '7.1.4'}
-                matched_count = sum(1 for _, ch in self.mono_files if ch != '?')
-                if matched_count in cfg_map:
-                    self.config_combo.setCurrentText(cfg_map[matched_count])
-
-                self._update_mono_files_list()
 
 
     
     def start_measure(self):
         input_mode = None
         input_data = None
-        
-        if self.btn_standard.isChecked() and self.current_file:
-            input_mode = 'file'
-            input_data = self.current_file
+
+        # 优先判断多单声道模式
+        if self.mono_files:
+            input_mode = 'mono_list'
+            input_data = self.mono_files
         elif self.btn_adm.isChecked() and self.current_file:
             input_mode = 'adm'
             # 使用已解析的parser，避免重复解析
@@ -1830,9 +1880,9 @@ class LoudnessMeterApp(QMainWindow):
                 except Exception as e:
                     QMessageBox.critical(self, self.tr("ADM错误"), self.tr("ADM 错误: {err}").format(err=str(e)))
                     return
-        elif self.btn_mono.isChecked() and self.mono_files:
-            input_mode = 'mono_list'
-            input_data = self.mono_files
+        elif self.current_file:
+            input_mode = 'file'
+            input_data = self.current_file
         else:
             QMessageBox.warning(self, self.tr("提示"), self.tr("请先选择输入文件"))
             return
