@@ -283,10 +283,9 @@ class DetailedMeasurementWorker(QThread):
         
         with sf.SoundFile(file_path, 'r') as f:
             idx = 0
-            loaded_size = 0
             chunk_samples = 1024 * 1024  # 1MB chunks
             
-            while loaded_size < file_size:
+            while True:
                 chunk = f.read(chunk_samples, dtype='float32')
                 if len(chunk) == 0:
                     break
@@ -298,11 +297,11 @@ class DetailedMeasurementWorker(QThread):
                 end_idx = min(idx + chunk_len, total_samples)
                 audio[idx:end_idx] = chunk[:end_idx-idx]
                 idx = end_idx
-                loaded_size += chunk_len * num_channels * 4
                 
-                # 更新进度 5-15%
-                progress = 5 + (loaded_size / file_size) * 10
-                mb_loaded = loaded_size / (1024 * 1024)
+                # 用已读取帧数占总帧数的比例计算进度，避免按字节估算导致的截断 bug
+                progress = 5 + (f.tell() / total_samples) * 10
+                bytes_per_frame = file_size / total_samples if total_samples > 0 else 0
+                mb_loaded = (f.tell() * bytes_per_frame) / (1024 * 1024)
                 mb_total = file_size / (1024 * 1024)
                 self.sub_step.emit(self.tr("加载中... {mb_loaded:.1f}/{mb_total:.1f} MB").format(mb_loaded=mb_loaded, mb_total=mb_total), int(progress))
         
