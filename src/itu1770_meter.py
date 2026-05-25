@@ -280,9 +280,12 @@ class ITU1770Meter:
     def _momentary_short_term(self, filtered: np.ndarray,
                               callback: Optional[Callable] = None):
         """
-        Momentary / Short-term（EBU Tech 3341）
+        Momentary / Short-term（EBU Tech 3341 / EBU Tech 3342）
         返回: (current_momentary, current_short_term,
-               max_momentary, max_short_term, short_term_values)
+               max_momentary, max_short_term,
+               short_term_values_100ms, short_term_values_1s)
+        short_term_values_100ms: 100ms 步进，用于实时显示 / max_short_term
+        short_term_values_1s:    1s 步进，用于 LRA（EBU Tech 3342 §3.1）
         """
         sr = 48000
         win_100ms = int(0.1 * sr)   # 4800 samples
@@ -306,7 +309,7 @@ class ITU1770Meter:
                 self._cb(callback, "计算短时/瞬时响度", pct)
 
         if not weighted_powers:
-            return -np.inf, -np.inf, -np.inf, -np.inf, []
+            return -np.inf, -np.inf, -np.inf, -np.inf, [], []
 
         # Momentary: 400ms 滑动窗口 = 4 个 100ms
         m_win = 4
@@ -323,9 +326,10 @@ class ITU1770Meter:
                 m = -np.inf
             momentary_values.append(m)
 
-        # Short-term: 3s 滑动窗口 = 30 个 100ms
+        # Short-term (EBU Tech 3341): 3s 滑动窗口，100ms 步进
+        # 用于实时显示和 max_short_term
         s_win = 30
-        short_term_values = []
+        short_term_values_100ms = []
         for i in range(len(weighted_powers)):
             start = max(0, i - s_win + 1)
             window = weighted_powers[start:i + 1]
@@ -336,15 +340,29 @@ class ITU1770Meter:
                 s = -0.691 + 10.0 * np.log10(mean_z)
             else:
                 s = -np.inf
-            short_term_values.append(s)
+            short_term_values_100ms.append(s)
+
+        # Short-term (EBU Tech 3342): 3s 窗口，1s 步进
+        # LRA 必须使用 1s 步进，否则窗口高度重叠导致动态范围被平滑
+        short_term_values_1s = []
+        step = 10  # 1 秒 = 10 个 100ms
+        for i in range(0, len(weighted_powers) - s_win + 1, step):
+            window = weighted_powers[i:i + s_win]
+            mean_z = np.mean(window)
+            if mean_z > 0.0:
+                s = -0.691 + 10.0 * np.log10(mean_z)
+            else:
+                s = -np.inf
+            short_term_values_1s.append(s)
 
         max_momentary = max(momentary_values) if momentary_values else -np.inf
-        max_short_term = max(short_term_values) if short_term_values else -np.inf
+        max_short_term = max(short_term_values_100ms) if short_term_values_100ms else -np.inf
         current_momentary = momentary_values[-1] if momentary_values else -np.inf
-        current_short_term = short_term_values[-1] if short_term_values else -np.inf
+        current_short_term = short_term_values_100ms[-1] if short_term_values_100ms else -np.inf
 
         return (current_momentary, current_short_term,
-                max_momentary, max_short_term, short_term_values)
+                max_momentary, max_short_term,
+                short_term_values_100ms, short_term_values_1s)
 
     @staticmethod
     def _lra(short_term_values: List[float]) -> float:
@@ -429,12 +447,13 @@ class ITU1770Meter:
         # ---- 阶段 5: Momentary / Short-term ----
         self._cb(progress_callback, "计算短时/瞬时响度", 50.0)
         (current_momentary, current_short_term,
-         max_momentary, max_short_term, short_term_values) = \
+         max_momentary, max_short_term,
+         short_term_values_100ms, short_term_values_1s) = \
             self._momentary_short_term(filtered, progress_callback)
 
         # ---- 阶段 6: LRA ----
         self._cb(progress_callback, "计算响度范围", 80.0)
-        lra = self._lra(short_term_values)
+        lra = self._lra(short_term_values_1s)
         self._cb(progress_callback, "计算响度范围", 90.0)
 
         # ---- 收尾 ----
