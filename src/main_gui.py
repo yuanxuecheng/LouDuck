@@ -215,13 +215,17 @@ class DetailedMeasurementWorker(QThread):
             
             self.sub_step.emit(self.tr("开始测量..."), 20)
             self.process_start_time = time.time()  # 记录处理开始时间
-            
+
             # === 阶段3: 响度测量 (20-90%) ===
             # 使用回调函数获取进度（适配新版 ITU1770Meter 的进度报告）
             def on_process_progress(step_name, overall_progress_pct):
+                # 检查是否请求中断
+                if self.isInterruptionRequested():
+                    raise RuntimeError("__INTERRUPTED__")
+
                 # 20-90% 区间映射
                 progress_pct = 20 + overall_progress_pct * 0.7
-                
+
                 # 计算实时处理倍速（按进度百分比推算已处理时长）
                 speed_str = ""
                 if self.process_start_time and self.audio_duration > 0:
@@ -230,10 +234,16 @@ class DetailedMeasurementWorker(QThread):
                     if elapsed > 0 and processed_time > 0:
                         speed_ratio = processed_time / elapsed
                         speed_str = self.tr(" | ⚡{ratio:.1f}x 实时").format(ratio=speed_ratio)
-                
+
                 self.sub_step.emit(f"{step_name}{speed_str}", int(progress_pct))
-            
-            result = meter.process_audio(audio, sr, progress_callback=on_process_progress)
+
+            try:
+                result = meter.process_audio(audio, sr, progress_callback=on_process_progress)
+            except RuntimeError as e:
+                if str(e) == "__INTERRUPTED__":
+                    self.sub_step.emit(self.tr("测量已停止"), 0)
+                    return
+                raise
             
             # === 阶段4: 最终计算 (90-95%) ===
             self.sub_step.emit(self.tr("计算最终指标..."), 90)
@@ -1508,7 +1518,22 @@ class LoudnessMeterApp(QMainWindow):
         self.start_btn.setStyleSheet('QPushButton { background-color: #667eea; color: white; font-weight: bold; font-size: 16px; padding: 12px; border-radius: 8px; } QPushButton:hover { background-color: #764ba2; }')
         self.start_btn.clicked.connect(self.start_measure)
         content_layout.addWidget(self.start_btn)
-        
+
+        # 停止测量 / 清空结果 按钮
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+        self.stop_btn = QPushButton(self.tr("⏹ 停止测量"))
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.setStyleSheet('QPushButton { background-color: #c0392b; color: white; font-size: 12px; padding: 8px; border-radius: 6px; } QPushButton:hover { background-color: #e74c3c; } QPushButton:disabled { background-color: #555; color: #888; }')
+        self.stop_btn.clicked.connect(self.stop_measure)
+        btn_row.addWidget(self.stop_btn)
+
+        self.clear_btn = QPushButton(self.tr("🧹 清空结果"))
+        self.clear_btn.setStyleSheet('QPushButton { background-color: #7f8c8d; color: white; font-size: 12px; padding: 8px; border-radius: 6px; } QPushButton:hover { background-color: #95a5a6; }')
+        self.clear_btn.clicked.connect(self.clear_results)
+        btn_row.addWidget(self.clear_btn)
+        content_layout.addLayout(btn_row)
+
         content_layout.addStretch()
         layout.addWidget(content_widget)
         layout.addStretch()
@@ -1901,6 +1926,7 @@ class LoudnessMeterApp(QMainWindow):
         
         # 重置UI状态
         self.start_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
         self.progress.setVisible(True)
         self.progress.setValue(0)
         self.export_txt_btn.setEnabled(False)
@@ -1965,13 +1991,43 @@ class LoudnessMeterApp(QMainWindow):
         self.export_txt_btn.setEnabled(True)
         self.export_json_btn.setEnabled(True)
         self.export_excel_btn.setEnabled(True)
-    
+        self.stop_btn.setEnabled(False)
+
+    def stop_measure(self):
+        """停止当前测量线程"""
+        if self.worker and self.worker.isRunning():
+            self.worker.requestInterruption()
+            if not self.worker.wait(3000):
+                self.worker.terminate()
+            self.step_label.setText(self.tr("已停止"))
+            self.status.setText(self.tr("测量已停止"))
+            self.progress.setVisible(False)
+            self.start_btn.setEnabled(True)
+            self.stop_btn.setEnabled(False)
+
+    def clear_results(self):
+        """清空右侧结果数据"""
+        self.current_results = None
+        for i in range(self.result_table.rowCount()):
+            item = QTableWidgetItem("--")
+            item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.result_table.setItem(i, 1, item)
+        self.int_status.setText(self.tr("节目响度: --"))
+        self.int_status.setStyleSheet("padding: 4px; border-radius: 4px;")
+        self.tp_status.setText(self.tr("峰值: --"))
+        self.tp_status.setStyleSheet("padding: 4px; border-radius: 4px;")
+        self.status.setText(self.tr("就绪"))
+        self.export_txt_btn.setEnabled(False)
+        self.export_json_btn.setEnabled(False)
+        self.export_excel_btn.setEnabled(False)
+
     def on_error(self, msg):
         self.progress.setVisible(False)
         self.start_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
         self.step_label.setText(self.tr("错误"))
         QMessageBox.critical(self, self.tr("错误"), msg)
-    
+
     def _build_file_info(self) -> dict:
         """构建当前被测文件信息字典"""
         info = {
