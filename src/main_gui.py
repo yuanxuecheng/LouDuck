@@ -745,7 +745,7 @@ class LoudnessMeterApp(QMainWindow):
         self.mode_button_group.setExclusive(True)
 
         self.btn_file = QPushButton(self.tr("📁 WAV"))
-        self.btn_adm = QPushButton("📦 ADM/BW64")
+        self.btn_adm = QPushButton("📦 ADM")
 
         for btn in (self.btn_file, self.btn_adm):
             btn.setCheckable(True)
