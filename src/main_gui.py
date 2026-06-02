@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QButtonGroup, QScrollArea, QGridLayout, QStyledItemDelegate, QHeaderView
 )
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QFont, QColor
+from PySide6.QtGui import QFont, QColor, QPixmap
 
 
 @dataclass
