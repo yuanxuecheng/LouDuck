@@ -752,19 +752,12 @@ class LoudnessMeterApp(QMainWindow):
         self.mode_button_group = QButtonGroup(self)
         self.mode_button_group.setExclusive(True)
 
-        self.btn_file = QPushButton(self.tr("📁 WAV"))
-        self.btn_adm = QPushButton("📦 ADM")
-
-        for btn in (self.btn_file, self.btn_adm):
-            btn.setCheckable(True)
-            btn.setCursor(Qt.PointingHandCursor)
-            self.mode_button_group.addButton(btn)
-
+        self.btn_file = QPushButton(self.tr("📁 文件导入"))
+        self.btn_file.setCheckable(True)
+        self.btn_file.setCursor(Qt.PointingHandCursor)
+        self.mode_button_group.addButton(self.btn_file)
         self.btn_file.clicked.connect(lambda: self.on_input_mode_changed('file'))
-        self.btn_adm.clicked.connect(lambda: self.on_input_mode_changed('adm'))
-
         mode_layout.addWidget(self.btn_file)
-        mode_layout.addWidget(self.btn_adm)
         layout.addWidget(mode_group)
 
         self._mode_style_default = """
@@ -1160,24 +1153,19 @@ class LoudnessMeterApp(QMainWindow):
         self.btn_file.setStyleSheet(
             self._mode_style_active if active_mode == 'file' else self._mode_style_default
         )
-        self.btn_adm.setStyleSheet(
-            self._mode_style_active if active_mode == 'adm' else self._mode_style_default
-        )
-
         self.btn_file.setChecked(active_mode == 'file')
-        self.btn_adm.setChecked(active_mode == 'adm')
 
     def _update_mode_ui(self, mode: str):
         """根据模式切换左侧各区块显隐"""
-        # 'file' 模式下根据是否加载了 mono_files 决定显示标准区域还是单声道区域
         is_file_mode = (mode == 'file')
         is_mono = is_file_mode and bool(self.mono_files)
         self.standard_section.setVisible(is_file_mode and not is_mono)
         self.mono_section.setVisible(is_mono)
-        self.adm_section.setVisible(mode == 'adm')
+        # ADM 信息区域：只要有已解析的 ADM 数据就显示
+        has_adm = hasattr(self, 'current_adm_parser') and self.current_adm_parser is not None
+        self.adm_section.setVisible(has_adm)
         if hasattr(self, 'file_info_group'):
-            # file 和 adm 模式都显示文件信息
-            self.file_info_group.setVisible(mode in ('file', 'adm'))
+            self.file_info_group.setVisible(is_file_mode)
 
     # ---------- 多单声道控制方法 ----------
 
@@ -1347,49 +1335,43 @@ class LoudnessMeterApp(QMainWindow):
         self._load_file_by_path(path)
 
     def _load_file_by_path(self, path: str):
-        """根据路径自动判断模式并加载文件"""
+        """根据路径自动判断模式并加载文件（统一文件导入模式）"""
         p = Path(path)
         ext = p.suffix.lower()
 
+        if ext not in ('.wav', '.flac', '.mp3', '.ogg', '.bw64', '.adm'):
+            QMessageBox.warning(self, self.tr("不支持的文件"), self.tr("无法识别该文件类型:\n{name}").format(name=p.name))
+            return
+
+        try:
+            info = sf.info(path)
+        except Exception as e:
+            QMessageBox.warning(self, self.tr("文件错误"), self.tr("无法读取文件:\n{err}").format(err=e))
+            return
+
+        self.btn_file.setChecked(True)
+        self.on_input_mode_changed('file')
+        self.current_file = path
+        self.mono_files = None
+        self.filename_label.setText(f"✓ {p.name}")
+        self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #27ae60;")
+        self.path_label.setText(str(p.parent))
+        self._update_file_metadata(path)
+        self._update_channel_order(path)
+
+        # 自动检测 ADM 元数据
         if ext in ('.wav', '.bw64', '.adm'):
-            # 尝试判断是否为ADM
             try:
                 if is_adm_file(path):
-                    self.btn_adm.setChecked(True)
-                    self.on_input_mode_changed('adm')
-                    self.current_file = path
-                    self.filename_label.setText(f"✓ ADM: {p.name}")
-                    self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #e74c3c;")
-                    self.path_label.setText(str(p.parent))
-                    self._update_file_metadata(path)
+                    self.current_adm_parser = BW64Parser(path)
+                    self.current_adm_parser.parse()
                     self.parse_and_display_adm(path)
-                    return
             except Exception:
                 pass
 
-        # 标准音频
-        if ext in ('.wav', '.flac', '.mp3', '.ogg'):
-            try:
-                info = sf.info(path)
-                self.btn_file.setChecked(True)
-                self.on_input_mode_changed('file')
-                self.current_file = path
-                self.mono_files = None
-                self.filename_label.setText(f"✓ {p.name}")
-                self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #27ae60;")
-                self.path_label.setText(str(p.parent))
-                self._update_file_metadata(path)
-                self._update_channel_order(path)
-
-                cfg_map = {2: 'stereo', 6: '5.1', 8: '7.1', 10: '5.1.4', 12: '7.1.4'}
-                if info.channels in cfg_map:
-                    self.config_combo.setCurrentText(cfg_map[info.channels])
-                return
-            except Exception as e:
-                QMessageBox.warning(self, self.tr("文件错误"), self.tr("无法读取文件:\n{err}").format(err=e))
-                return
-
-        QMessageBox.warning(self, self.tr("不支持的文件"), self.tr("无法识别该文件类型:\n{name}").format(name=p.name))
+        cfg_map = {2: 'stereo', 6: '5.1', 8: '7.1', 10: '5.1.4', 12: '7.1.4'}
+        if info.channels in cfg_map:
+            self.config_combo.setCurrentText(cfg_map[info.channels])
 
     
     def _create_center_panel(self):
@@ -1777,16 +1759,9 @@ class LoudnessMeterApp(QMainWindow):
 
     def browse(self):
         """浏览文件"""
-        # 确定当前模式
-        if self.btn_adm.isChecked():
-            mode = 'adm'
-        elif self.btn_file.isChecked():
-            mode = 'file'
-        else:
+        if not self.btn_file.isChecked():
             QMessageBox.warning(self, self.tr("提示"), self.tr("请先选择输入方式"))
             return
-
-        if mode == 'file':
             files, _ = QFileDialog.getOpenFileNames(
                 self, self.tr("选择音频文件"), "", "音频 (*.wav *.flac *.mp3 *.ogg)"
             )
@@ -1803,18 +1778,11 @@ class LoudnessMeterApp(QMainWindow):
                     QMessageBox.critical(self, self.tr("错误"), self.tr("无法读取文件: {err}").format(err=str(e)))
                     return
 
-                # 检查是否为 ADM/BW64（优先）
+                # 检查是否为 ADM/BW64（自动检测）
                 if is_adm_file(path):
-                    self.on_input_mode_changed('adm')
-                    self.current_file = path
-                    self.filename_label.setText(f"✓ ADM: {p.name}")
-                    self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #e74c3c;")
-                    self.path_label.setText(str(p.parent))
-                    self._update_file_metadata(path)
-                    self.parse_and_display_adm(path)
-                    return
+                    self.current_adm_parser = BW64Parser(path)
+                    self.current_adm_parser.parse()
 
-                # 普通多声道文件
                 self.on_input_mode_changed('file')
                 self.current_file = path
                 self.mono_files = None
@@ -1823,6 +1791,8 @@ class LoudnessMeterApp(QMainWindow):
                 self.path_label.setText(str(p.parent))
                 self._update_file_metadata(path)
                 self._update_channel_order(path)
+                if hasattr(self, 'current_adm_parser') and self.current_adm_parser:
+                    self.parse_and_display_adm(path)
                 cfg_map = {2: 'stereo', 6: '5.1', 8: '7.1', 10: '5.1.4', 12: '7.1.4'}
                 if info.channels in cfg_map:
                     self.config_combo.setCurrentText(cfg_map[info.channels])
@@ -1878,19 +1848,6 @@ class LoudnessMeterApp(QMainWindow):
                 # 刷新 UI 显隐，确保 mono_section 正确显示
                 self._update_mode_ui('file')
 
-        elif mode == 'adm':  # ADM
-            path, _ = QFileDialog.getOpenFileName(
-                self, "选择ADM", "", "ADM (*.wav *.bw64 *.adm)"
-            )
-            if path:
-                self.current_file = path
-                p = Path(path)
-                self.filename_label.setText(f"✓ ADM: {p.name}")
-                self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #e74c3c;")
-                self.path_label.setText(str(p.parent))
-                self._update_file_metadata(path)
-                self.parse_and_display_adm(path)
-
 
     
     def start_measure(self):
@@ -1901,20 +1858,9 @@ class LoudnessMeterApp(QMainWindow):
         if self.mono_files:
             input_mode = 'mono_list'
             input_data = self.mono_files
-        elif self.btn_adm.isChecked() and self.current_file:
+        elif hasattr(self, 'current_adm_parser') and self.current_adm_parser and self.current_file:
             input_mode = 'adm'
-            # 使用已解析的parser，避免重复解析
-            if hasattr(self, 'current_adm_parser') and self.current_adm_parser:
-                input_data = self.current_adm_parser
-            else:
-                # 如果没有预解析，重新解析
-                try:
-                    parser = BW64Parser(self.current_file)
-                    parser.parse()
-                    input_data = parser
-                except Exception as e:
-                    QMessageBox.critical(self, self.tr("ADM错误"), self.tr("ADM 错误: {err}").format(err=str(e)))
-                    return
+            input_data = self.current_adm_parser
         elif self.current_file:
             input_mode = 'file'
             input_data = self.current_file
@@ -2063,7 +2009,7 @@ class LoudnessMeterApp(QMainWindow):
                 {'path': path, 'channel': ch, 'name': Path(path).name}
                 for path, ch in self.mono_files
             ]
-        elif self.btn_adm.isChecked() and self.current_file:
+        elif hasattr(self, 'current_adm_parser') and self.current_adm_parser and self.current_file:
             info['mode'] = 'adm'
             info['file_path'] = str(Path(self.current_file).parent)
             info['file_name'] = Path(self.current_file).name
@@ -2080,8 +2026,6 @@ class LoudnessMeterApp(QMainWindow):
         """生成导出文件名基础部分（取自被测文件共有名）"""
         if self.mono_files:
             stems = [Path(p).stem for p, _ in self.mono_files]
-        elif self.btn_adm.isChecked() and self.current_file:
-            return Path(self.current_file).stem
         elif self.current_file:
             return Path(self.current_file).stem
             if not stems:
