@@ -1614,13 +1614,13 @@ class LoudnessMeterApp(QMainWindow):
         except NameError:
             base_dir = Path.cwd()
         bg_path = str((base_dir / 'assets' / 'bg.png').absolute()).replace('\\', '/')
-        self.setStyleSheet(f"""
-            QMainWindow {{
+        self.setStyleSheet("""
+            QMainWindow {
                 background-color: #1a1a2e;
-                background-image: url('{bg_path}');
+                background-image: url('""" + bg_path + """');
                 background-position: center;
                 background-repeat: no-repeat;
-            }}
+            }
             QWidget { background-color: #1a1a2e; color: #eee; }
             QGroupBox {
                 border: 2px solid #667eea;
