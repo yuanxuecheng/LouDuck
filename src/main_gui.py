@@ -493,6 +493,14 @@ class LoudnessMeterApp(QMainWindow):
     def _setup_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
+        
+        # 背景图片层（放在最底层，不拦截鼠标事件）
+        self.bg_label = QLabel(central)
+        self.bg_label.setPixmap(QPixmap("assets/bg.png"))
+        self.bg_label.setScaledContents(True)
+        self.bg_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.bg_label.lower()
+        
         main_layout = QHBoxLayout(central)
         main_layout.setSpacing(10)
         main_layout.setContentsMargins(10, 10, 10, 10)
@@ -1608,19 +1616,8 @@ class LoudnessMeterApp(QMainWindow):
         return panel
     
     def _apply_theme(self):
-        # 计算背景图片绝对路径（支持源码运行和 PyInstaller 打包）
-        try:
-            base_dir = Path(__file__).parent.parent
-        except NameError:
-            base_dir = Path.cwd()
-        bg_path = str((base_dir / 'assets' / 'bg.png').absolute()).replace('\\', '/')
         self.setStyleSheet("""
-            QMainWindow {
-                background-color: #1a1a2e;
-                background-image: url('""" + bg_path + """');
-                background-position: center;
-                background-repeat: no-repeat;
-            }
+            QMainWindow { background-color: #1a1a2e; }
             QWidget { background-color: #1a1a2e; color: #eee; }
             QGroupBox {
                 border: 2px solid #667eea;
@@ -2039,6 +2036,12 @@ class LoudnessMeterApp(QMainWindow):
         self.step_label.setText(self.tr("错误"))
         QMessageBox.critical(self, self.tr("错误"), msg)
 
+    def resizeEvent(self, event):
+        """窗口大小变化时更新背景层尺寸"""
+        super().resizeEvent(event)
+        if hasattr(self, 'bg_label') and self.bg_label and self.centralWidget():
+            self.bg_label.setGeometry(self.centralWidget().rect())
+    
     def _build_file_info(self) -> dict:
         """构建当前被测文件信息字典"""
         info = {
