@@ -1440,12 +1440,12 @@ class LoudnessMeterApp(QMainWindow):
         right_info.setSpacing(0)
         right_info.setAlignment(Qt.AlignRight | Qt.AlignBottom)
         
-        version_label = QLabel('v1.0  (build 260511)')
+        version_label = QLabel('v1.0  (build 260526)')
         version_label.setStyleSheet('color: #667eea; font-size: 8px; border: none;')
         version_label.setAlignment(Qt.AlignRight)
         right_info.addWidget(version_label)
         
-        copyright_label = QLabel('© 2026 YOY')
+        copyright_label = QLabel('© 2026 YOYH')
         copyright_label.setStyleSheet('color: #888; font-size: 7px; border: none;')
         copyright_label.setAlignment(Qt.AlignRight)
         right_info.addWidget(copyright_label)
@@ -1608,8 +1608,19 @@ class LoudnessMeterApp(QMainWindow):
         return panel
     
     def _apply_theme(self):
-        self.setStyleSheet("""
-            QMainWindow { background-color: #1a1a2e; }
+        # 计算背景图片绝对路径（支持源码运行和 PyInstaller 打包）
+        try:
+            base_dir = Path(__file__).parent.parent
+        except NameError:
+            base_dir = Path.cwd()
+        bg_path = str((base_dir / 'assets' / 'bg.png').absolute()).replace('\\', '/')
+        self.setStyleSheet(f"""
+            QMainWindow {{
+                background-color: #1a1a2e;
+                background-image: url('{bg_path}');
+                background-position: center;
+                background-repeat: no-repeat;
+            }}
             QWidget { background-color: #1a1a2e; color: #eee; }
             QGroupBox {
                 border: 2px solid #667eea;
@@ -2489,7 +2500,7 @@ def _show_splash(app):
     painter.setPen(QColor("#667eea"))
     painter.setFont(QFont("Segoe UI", 10))
     fm = QFontMetrics(painter.font())
-    text = "v1.0  (build 260511)"
+    text = "v1.0  (build 260526)"
     x = (pixmap.width() - fm.horizontalAdvance(text)) // 2
     painter.drawText(x, 180, text)
     
