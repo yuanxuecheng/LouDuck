@@ -1620,6 +1620,7 @@ class LoudnessMeterApp(QMainWindow):
         self.current_file = None
         self.mono_files = None
         self.current_adm_parser = None
+        self.rendered_file = None
 
         if hasattr(self, 'filename_label'):
             self.filename_label.setText(self.tr("未选择文件"))
@@ -1675,19 +1676,20 @@ class LoudnessMeterApp(QMainWindow):
         self.render_progress.setValue(percent)
 
     def _on_render_finished(self, output_path: str):
-        """渲染完成，切换到标准模式并自动开始测量"""
+        """渲染完成，保留 ADM UI 信息，仅更新文件信息为渲染后的文件"""
         self.render_step_label.setText(self.tr("🎧 渲染完成"))
         self.render_progress.setValue(100)
         self.atmos_render_btn.setEnabled(True)
 
-        # 切换到文件模式，加载渲染后的文件
-        self.on_input_mode_changed('file')
+        # 保留 ADM 解析器与 UI，仅更新文件信息区域
+        self.rendered_file = output_path
         self.current_file = output_path
         p = Path(output_path)
         self.filename_label.setText(self.tr("✓ 渲染: {name}").format(name=p.name))
         self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #9b59b6;")
         self.path_label.setText(str(p.parent))
         self._update_file_metadata(output_path)
+        self._update_channel_order(output_path)
 
         # 自动设置声道配置
         cfg_map = {"Stereo (2.0)": "stereo", "5.1 (6ch)": "5.1", "7.1 (8ch)": "7.1",
@@ -1806,6 +1808,10 @@ class LoudnessMeterApp(QMainWindow):
         if self.mono_files:
             input_mode = 'mono_list'
             input_data = self.mono_files
+        elif hasattr(self, 'rendered_file') and self.rendered_file and self.current_file:
+            # 渲染后的 ADM：测量渲染生成的文件，而非原始 ADM
+            input_mode = 'file'
+            input_data = self.rendered_file
         elif hasattr(self, 'current_adm_parser') and self.current_adm_parser and self.current_file:
             input_mode = 'adm'
             input_data = self.current_adm_parser
