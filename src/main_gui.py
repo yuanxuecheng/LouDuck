@@ -93,7 +93,7 @@ class LoudnessCurveWidget(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
 
         w, h = self.width(), self.height()
-        margin_left, margin_right = 58, 15
+        margin_left, margin_right = 62, 15
         margin_top, margin_bottom = 15, 30
         chart_w = w - margin_left - margin_right
         chart_h = h - margin_top - margin_bottom
@@ -116,13 +116,13 @@ class LoudnessCurveWidget(QWidget):
             painter.setPen(QPen(QColor("#333333"), 1, Qt.DashLine))
             painter.drawLine(margin_left, int(y_pos), margin_left + chart_w, int(y_pos))
             painter.setPen(QColor("#aaa"))
-            painter.drawText(5, int(y_pos) - 6, 40, 12, Qt.AlignRight | Qt.AlignVCenter, f"{int(y_val)}")
+            painter.drawText(14, int(y_pos) - 6, 44, 12, Qt.AlignRight | Qt.AlignVCenter, f"{int(y_val)}")
 
         # 目标响度值在纵轴上额外标出（橙色）
         if self.y_min <= self.target_lufs <= self.y_max:
             y_target_pos = margin_top + chart_h - (self.target_lufs - self.y_min) / (self.y_max - self.y_min) * chart_h
             painter.setPen(QColor("#f39c12"))
-            painter.drawText(5, int(y_target_pos) - 6, 40, 12, Qt.AlignRight | Qt.AlignVCenter,
+            painter.drawText(14, int(y_target_pos) - 6, 44, 12, Qt.AlignRight | Qt.AlignVCenter,
                              f"{self.target_lufs:.0f}")
 
         # X 轴网格线与刻度
@@ -163,7 +163,7 @@ class LoudnessCurveWidget(QWidget):
 
         # 轴标签
         painter.setPen(QColor("#ccc"))
-        painter.drawText(2, h // 2 - 36, 16, 72, Qt.AlignCenter | Qt.TextWordWrap, "LKFS")
+        painter.drawText(0, h // 2 - 40, 12, 80, Qt.AlignCenter, "L\nK\nF\nS")
         painter.drawText(w // 2 - 30, h - 14, 60, 14, Qt.AlignCenter, self.tr("时间 (s)"))
 
         painter.end()
@@ -1673,9 +1673,10 @@ class LoudnessMeterApp(QMainWindow):
     
     def _apply_theme(self):
         self.setStyleSheet("""
-            QMainWindow { background-color: #1a1a2e; }
-            QWidget { background-color: #1a1a2e; color: #eee; }
+            QMainWindow { background-color: rgba(26, 26, 46, 153); }
+            QWidget { background-color: rgba(26, 26, 46, 153); color: #eee; }
             QGroupBox {
+                background-color: rgba(26, 26, 46, 153);
                 border: 2px solid #667eea;
                 border-radius: 8px;
                 margin-top: 8px;
@@ -1685,7 +1686,7 @@ class LoudnessMeterApp(QMainWindow):
             }
             QGroupBox::title { color: #667eea; }
             QTableWidget {
-                background-color: #16213e;
+                background-color: rgba(22, 33, 62, 153);
                 border: 1px solid #667eea;
                 font-size: 12px;
             }
@@ -1695,14 +1696,14 @@ class LoudnessMeterApp(QMainWindow):
                 padding: 4px;
             }
             QPushButton {
-                background-color: #0f3460;
+                background-color: rgba(15, 52, 96, 153);
                 border: 1px solid #667eea;
                 padding: 6px 12px;
                 border-radius: 4px;
             }
             QPushButton:hover { background-color: #667eea; }
             QComboBox {
-                background-color: #16213e;
+                background-color: rgba(22, 33, 62, 153);
                 border: 1px solid #667eea;
                 padding: 4px;
             }
@@ -1714,7 +1715,7 @@ class LoudnessMeterApp(QMainWindow):
             QProgressBar::chunk { background-color: #667eea; }
             QLabel { font-size: 12px; }
             QLineEdit {
-                background-color: #16213e;
+                background-color: rgba(22, 33, 62, 153);
                 border: 1px solid #667eea;
                 padding: 4px;
             }
