@@ -737,41 +737,11 @@ class LoudnessMeterApp(QMainWindow):
         layout.setSpacing(12)
         layout.setContentsMargins(14, 14, 14, 14)
 
-        # === 1. 输入方式分段按钮 ===
-        mode_group = QGroupBox(self.tr("输入方式"))
-        mode_group.setStyleSheet("""
-            QGroupBox {
-                font-size: 12px;
-                border: 1px solid #0f3460;
-            }
-            QGroupBox::title { color: #aaa; }
-        """)
-        mode_layout = QHBoxLayout(mode_group)
-        mode_layout.setSpacing(4)
-
-        self.mode_button_group = QButtonGroup(self)
-        self.mode_button_group.setExclusive(True)
-
+        # === 1. 文件导入按钮 ===
         self.btn_file = QPushButton(self.tr("📁 文件导入"))
-        self.btn_file.setCheckable(True)
         self.btn_file.setCursor(Qt.PointingHandCursor)
-        self.mode_button_group.addButton(self.btn_file)
-        self.btn_file.clicked.connect(lambda: self.on_input_mode_changed('file'))
-        mode_layout.addWidget(self.btn_file)
-        layout.addWidget(mode_group)
-
-        self._mode_style_default = """
-            QPushButton {
-                background-color: #0f3460;
-                border: 1px solid #667eea;
-                padding: 8px 10px;
-                border-radius: 4px;
-                font-size: 12px;
-                color: #ccc;
-            }
-            QPushButton:hover { background-color: #1a4a7a; }
-        """
-        self._mode_style_active = """
+        self.btn_file.clicked.connect(self.browse)
+        self.btn_file.setStyleSheet("""
             QPushButton {
                 background-color: #667eea;
                 border: 2px solid #764ba2;
@@ -782,8 +752,8 @@ class LoudnessMeterApp(QMainWindow):
                 color: white;
             }
             QPushButton:hover { background-color: #764ba2; }
-        """
-        self._update_mode_buttons('file')
+        """)
+        layout.addWidget(self.btn_file)
 
         # === 2. 文件信息卡片 ===
         # === 2. 文件信息卡片（单个多声道/ADM 模式显示） ===
@@ -849,22 +819,6 @@ class LoudnessMeterApp(QMainWindow):
         self.channel_order_label.setStyleSheet("color: #aaa; font-size: 11px; padding: 2px;")
         self.channel_order_label.setWordWrap(True)
         file_layout.addWidget(self.channel_order_label)
-
-        # === 浏览按钮（永久显示） ===
-        browse_btn = QPushButton(self.tr("浏览..."))
-        browse_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #667eea;
-                border: none;
-                padding: 6px 14px;
-                border-radius: 4px;
-                font-size: 12px;
-                color: white;
-            }
-            QPushButton:hover { background-color: #764ba2; }
-        """)
-        browse_btn.clicked.connect(self.browse)
-        layout.addWidget(browse_btn)
 
         layout.addWidget(self.file_info_group)
 
@@ -1149,11 +1103,8 @@ class LoudnessMeterApp(QMainWindow):
         return scroll
 
     def _update_mode_buttons(self, active_mode: str):
-        """更新输入模式按钮样式"""
-        self.btn_file.setStyleSheet(
-            self._mode_style_active if active_mode == 'file' else self._mode_style_default
-        )
-        self.btn_file.setChecked(active_mode == 'file')
+        """更新输入模式按钮样式（单按钮模式，无操作）"""
+        pass
 
     def _update_mode_ui(self, mode: str):
         """根据模式切换左侧各区块显隐"""
@@ -1349,7 +1300,6 @@ class LoudnessMeterApp(QMainWindow):
             QMessageBox.warning(self, self.tr("文件错误"), self.tr("无法读取文件:\n{err}").format(err=e))
             return
 
-        self.btn_file.setChecked(True)
         self.on_input_mode_changed('file')
         self.current_file = path
         self.mono_files = None
@@ -1731,7 +1681,6 @@ class LoudnessMeterApp(QMainWindow):
         self.atmos_render_btn.setEnabled(True)
 
         # 切换到文件模式，加载渲染后的文件
-        self.btn_file.setChecked(True)
         self.on_input_mode_changed('file')
         self.current_file = output_path
         p = Path(output_path)
@@ -1758,95 +1707,94 @@ class LoudnessMeterApp(QMainWindow):
         QMessageBox.critical(self, self.tr("渲染失败"), self.tr("渲染过程中出错:\n{err}").format(err=error_msg))
 
     def browse(self):
-        """浏览文件"""
-        if not self.btn_file.isChecked():
-            QMessageBox.warning(self, self.tr("提示"), self.tr("请先选择输入方式"))
+        """浏览文件（统一入口）"""
+        files, _ = QFileDialog.getOpenFileNames(
+            self, self.tr("选择音频文件"), "", "音频 (*.wav *.flac *.mp3 *.ogg)"
+        )
+        if not files:
             return
-            files, _ = QFileDialog.getOpenFileNames(
-                self, self.tr("选择音频文件"), "", "音频 (*.wav *.flac *.mp3 *.ogg)"
-            )
-            if not files:
+
+        if len(files) == 1:
+            # 单个文件：判断是 ADM 还是普通多声道
+            path = files[0]
+            p = Path(path)
+            try:
+                info = sf.info(path)
+            except Exception as e:
+                QMessageBox.critical(self, self.tr("错误"), self.tr("无法读取文件: {err}").format(err=str(e)))
                 return
 
-            if len(files) == 1:
-                # 单个文件：判断是 ADM 还是普通多声道
-                path = files[0]
-                p = Path(path)
+            # 先重置状态，再检测 ADM（避免 on_input_mode_changed 清除 adm_parser）
+            self.on_input_mode_changed('file')
+            self.current_file = path
+            self.mono_files = None
+            self.filename_label.setText(f"✓ {p.name}")
+            self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #27ae60;")
+            self.path_label.setText(str(p.parent))
+            self._update_file_metadata(path)
+            self._update_channel_order(path)
+
+            # 检查是否为 ADM/BW64（自动检测）
+            if is_adm_file(path):
+                self.current_adm_parser = BW64Parser(path)
+                self.current_adm_parser.parse()
+                self.parse_and_display_adm(path)
+                self._update_mode_ui('file')  # 刷新 ADM 区域显隐
+
+            cfg_map = {2: 'stereo', 6: '5.1', 8: '7.1', 10: '5.1.4', 12: '7.1.4'}
+            if info.channels in cfg_map:
+                self.config_combo.setCurrentText(cfg_map[info.channels])
+
+        else:
+            # 多个文件：强制要求所有文件都是单声道 WAV
+            for path in files:
                 try:
                     info = sf.info(path)
                 except Exception as e:
-                    QMessageBox.critical(self, self.tr("错误"), self.tr("无法读取文件: {err}").format(err=str(e)))
+                    QMessageBox.critical(self, self.tr("错误"), self.tr("无法读取文件 {name}: {err}").format(name=Path(path).name, err=str(e)))
+                    return
+                if info.channels != 1:
+                    QMessageBox.critical(
+                        self, self.tr("声道错误"),
+                        self.tr("文件 {name} 不是单声道（{ch} 声道）。\n\n多文件模式要求所有文件必须是单声道。").format(name=Path(path).name, ch=info.channels)
+                    )
+                    return
+                if Path(path).suffix.lower() != '.wav':
+                    QMessageBox.critical(
+                        self, self.tr("格式错误"),
+                        self.tr("文件 {name} 不是 WAV 格式。\n\n多文件模式仅支持 WAV。").format(name=Path(path).name)
+                    )
                     return
 
-                # 检查是否为 ADM/BW64（自动检测）
-                if is_adm_file(path):
-                    self.current_adm_parser = BW64Parser(path)
-                    self.current_adm_parser.parse()
+            # 进入多单声道模式
+            self.on_input_mode_changed('file')
+            self.current_file = None
+            self.mono_files = [(p, '?') for p in files]
+            self.filename_label.setText(self.tr("✓ {count} 个单声道文件").format(count=len(files)))
+            self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #27ae60;")
+            self.path_label.setText(str(Path(files[0]).parent))
 
-                self.on_input_mode_changed('file')
-                self.current_file = path
-                self.mono_files = None
-                self.filename_label.setText(f"✓ {p.name}")
-                self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #27ae60;")
-                self.path_label.setText(str(p.parent))
-                self._update_file_metadata(path)
-                self._update_channel_order(path)
-                if hasattr(self, 'current_adm_parser') and self.current_adm_parser:
-                    self.parse_and_display_adm(path)
-                cfg_map = {2: 'stereo', 6: '5.1', 8: '7.1', 10: '5.1.4', 12: '7.1.4'}
-                if info.channels in cfg_map:
-                    self.config_combo.setCurrentText(cfg_map[info.channels])
+            # 自动匹配声道
+            template_map = {
+                "Stereo (2.0)": "Stereo (2.0)",
+                "5.1 (6ch)": "5.1 (6ch)",
+                "7.1 (8ch)": "7.1 (8ch)",
+                "7.1.2 (10ch)": "7.1.2 (10ch)",
+                "5.1.4 (10ch)": "5.1.4 (10ch)",
+                "7.1.4 (12ch)": "7.1.4 (12ch)",
+            }
+            combo_text = self.mono_template_combo.currentText()
+            template_name = template_map.get(combo_text, None)
+            self.mono_files = auto_match_mono_files(files, template_name=template_name)
 
-            else:
-                # 多个文件：强制要求所有文件都是单声道 WAV
-                for path in files:
-                    try:
-                        info = sf.info(path)
-                    except Exception as e:
-                        QMessageBox.critical(self, self.tr("错误"), self.tr("无法读取文件 {name}: {err}").format(name=Path(path).name, err=str(e)))
-                        return
-                    if info.channels != 1:
-                        QMessageBox.critical(
-                            self, self.tr("声道错误"),
-                            self.tr("文件 {name} 不是单声道（{ch} 声道）。\n\n多文件模式要求所有文件必须是单声道。").format(name=Path(path).name, ch=info.channels)
-                        )
-                        return
-                    if Path(path).suffix.lower() != '.wav':
-                        QMessageBox.critical(
-                            self, self.tr("格式错误"),
-                            self.tr("文件 {name} 不是 WAV 格式。\n\n多文件模式仅支持 WAV。").format(name=Path(path).name)
-                        )
-                        return
+            cfg_map = {2: 'stereo', 6: '5.1', 8: '7.1', 10: '5.1.4', 12: '7.1.4'}
+            matched_count = sum(1 for _, ch in self.mono_files if ch != '?')
+            if matched_count in cfg_map:
+                self.config_combo.setCurrentText(cfg_map[matched_count])
 
-                # 进入多单声道模式
-                self.on_input_mode_changed('file')
-                self.current_file = None
-                self.mono_files = [(p, '?') for p in files]
-                self.filename_label.setText(self.tr("✓ {count} 个单声道文件").format(count=len(files)))
-                self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #27ae60;")
-                self.path_label.setText(str(Path(files[0]).parent))
-
-                # 自动匹配声道
-                template_map = {
-                    "Stereo (2.0)": "Stereo (2.0)",
-                    "5.1 (6ch)": "5.1 (6ch)",
-                    "7.1 (8ch)": "7.1 (8ch)",
-                    "7.1.2 (10ch)": "7.1.2 (10ch)",
-                    "5.1.4 (10ch)": "5.1.4 (10ch)",
-                    "7.1.4 (12ch)": "7.1.4 (12ch)",
-                }
-                combo_text = self.mono_template_combo.currentText()
-                template_name = template_map.get(combo_text, None)
-                self.mono_files = auto_match_mono_files(files, template_name=template_name)
-
-                cfg_map = {2: 'stereo', 6: '5.1', 8: '7.1', 10: '5.1.4', 12: '7.1.4'}
-                matched_count = sum(1 for _, ch in self.mono_files if ch != '?')
-                if matched_count in cfg_map:
-                    self.config_combo.setCurrentText(cfg_map[matched_count])
-
-                self._update_mono_files_list()
-                # 刷新 UI 显隐，确保 mono_section 正确显示
-                self._update_mode_ui('file')
+            self._update_mono_files_list()
+            # 刷新 UI 显隐，确保 mono_section 正确显示
+            self._update_mode_ui('file')
 
 
     
