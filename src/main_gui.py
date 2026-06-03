@@ -617,9 +617,11 @@ class LoudnessMeterApp(QMainWindow):
         # 背景图片层（放在最底层，不拦截鼠标事件）
         self.bg_label = QLabel(central)
         from PySide6.QtGui import QPixmap
-        self.bg_label.setPixmap(QPixmap("assets/bg.png"))
+        bg_path = str(_get_resource_path("assets/bg.png"))
+        self.bg_label.setPixmap(QPixmap(bg_path))
         self.bg_label.setScaledContents(True)
         self.bg_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.bg_label.setGeometry(central.rect())
         self.bg_label.lower()
         
         main_layout = QHBoxLayout(central)
@@ -2496,9 +2498,16 @@ class LoudnessMeterApp(QMainWindow):
 
 
 def _get_resource_path(relative_path):
-    """获取 PyInstaller 打包后的资源路径"""
+    """获取 PyInstaller 打包后的资源路径（兼容 onefile / onedir / 开发环境）"""
     if hasattr(sys, '_MEIPASS'):
+        # onefile 模式：资源在临时解压目录
         return Path(sys._MEIPASS) / relative_path
+    # onedir 模式或开发环境：优先尝试 EXE 所在目录
+    exe_dir = Path(sys.executable).parent
+    candidate = exe_dir / relative_path
+    if candidate.exists():
+        return candidate
+    # 开发环境回退
     return Path(__file__).parent.parent / relative_path
 
 
