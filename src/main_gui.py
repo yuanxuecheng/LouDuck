@@ -78,7 +78,7 @@ class LoudnessCurveWidget(QWidget):
         self.values: list = []
         self.duration: float = 0.0
         self.target_lufs: float = -23.0
-        self.y_min: float = -50.0
+        self.y_min: float = -40.0
         self.y_max: float = 0.0
 
     def set_data(self, values, duration, target_lufs):
@@ -109,7 +109,7 @@ class LoudnessCurveWidget(QWidget):
             return
 
         # Y 轴网格线与刻度
-        y_steps = 5  # -50, -40, -30, -20, -10, 0
+        y_steps = 4  # -40, -30, -20, -10, 0
         for i in range(y_steps + 1):
             y_val = self.y_min + i * (self.y_max - self.y_min) / y_steps
             y_pos = margin_top + chart_h - (y_val - self.y_min) / (self.y_max - self.y_min) * chart_h
@@ -117,6 +117,13 @@ class LoudnessCurveWidget(QWidget):
             painter.drawLine(margin_left, int(y_pos), margin_left + chart_w, int(y_pos))
             painter.setPen(QColor("#aaa"))
             painter.drawText(5, int(y_pos) - 6, 40, 12, Qt.AlignRight | Qt.AlignVCenter, f"{int(y_val)}")
+
+        # 目标响度值在纵轴上额外标出（橙色）
+        if self.y_min <= self.target_lufs <= self.y_max:
+            y_target_pos = margin_top + chart_h - (self.target_lufs - self.y_min) / (self.y_max - self.y_min) * chart_h
+            painter.setPen(QColor("#f39c12"))
+            painter.drawText(5, int(y_target_pos) - 6, 40, 12, Qt.AlignRight | Qt.AlignVCenter,
+                             f"{self.target_lufs:.0f}")
 
         # X 轴网格线与刻度
         x_ticks = self._calc_x_ticks(self.duration)
@@ -156,7 +163,7 @@ class LoudnessCurveWidget(QWidget):
 
         # 轴标签
         painter.setPen(QColor("#ccc"))
-        painter.drawText(2, h // 2 - 30, 12, 60, Qt.AlignCenter | Qt.TextWordWrap, "LUFS")
+        painter.drawText(2, h // 2 - 30, 12, 60, Qt.AlignCenter | Qt.TextWordWrap, "LKFS")
         painter.drawText(w // 2 - 30, h - 14, 60, 14, Qt.AlignCenter, self.tr("时间 (s)"))
 
         painter.end()
