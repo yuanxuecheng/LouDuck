@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QButtonGroup, QScrollArea, QGridLayout, QStyledItemDelegate, QHeaderView
 )
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QFont, QColor, QPixmap
+from PySide6.QtGui import QFont, QColor
 
 
 @dataclass
@@ -616,6 +616,7 @@ class LoudnessMeterApp(QMainWindow):
         
         # 背景图片层（放在最底层，不拦截鼠标事件）
         self.bg_label = QLabel(central)
+        from PySide6.QtGui import QPixmap
         self.bg_label.setPixmap(QPixmap("assets/bg.png"))
         self.bg_label.setScaledContents(True)
         self.bg_label.setAttribute(Qt.WA_TransparentForMouseEvents)
@@ -1500,12 +1501,12 @@ class LoudnessMeterApp(QMainWindow):
         right_info.setSpacing(0)
         right_info.setAlignment(Qt.AlignRight | Qt.AlignBottom)
         
-        version_label = QLabel('v1.0  (build 260526)')
+        version_label = QLabel('v1.0  (build 260603)')
         version_label.setStyleSheet('color: #667eea; font-size: 8px; border: none;')
         version_label.setAlignment(Qt.AlignRight)
         right_info.addWidget(version_label)
         
-        copyright_label = QLabel('© 2026 YOYH')
+        copyright_label = QLabel('© 2026 YOYH All Rights Reserved')
         copyright_label.setStyleSheet('color: #888; font-size: 7px; border: none;')
         copyright_label.setAlignment(Qt.AlignRight)
         right_info.addWidget(copyright_label)
@@ -2506,50 +2507,77 @@ def _show_splash(app):
     from PySide6.QtWidgets import QSplashScreen
     from PySide6.QtGui import QPixmap, QPainter, QFont, QColor, QFontMetrics
     from PySide6.QtCore import Qt
-    
-    pixmap = QPixmap(420, 280)
-    pixmap.fill(QColor("#0f0f23"))
-    
+
+    # 加载背景图
+    bg_path = _get_resource_path("assets/bg.png")
+    bg_pixmap = QPixmap(str(bg_path))
+    if bg_pixmap.isNull():
+        # 回退：纯色背景
+        bg_pixmap = QPixmap(800, 600)
+        bg_pixmap.fill(QColor("#0f0f23"))
+
+    # 使用背景图尺寸创建 splash
+    pixmap = QPixmap(bg_pixmap.size())
     painter = QPainter(pixmap)
-    # 边框
+    painter.drawPixmap(0, 0, bg_pixmap)
+
+    # 卡片尺寸与位置（居中）
+    card_w, card_h = 420, 280
+    card_x = (pixmap.width() - card_w) // 2
+    card_y = (pixmap.height() - card_h) // 2
+
+    # 60% 透明卡片背景
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor(26, 26, 46, 153))
+    painter.drawRoundedRect(card_x, card_y, card_w, card_h, 12, 12)
+
+    # 卡片边框
     painter.setPen(QColor("#667eea"))
     painter.setBrush(Qt.NoBrush)
-    painter.drawRoundedRect(10, 10, 400, 260, 12, 12)
-    
+    painter.drawRoundedRect(card_x, card_y, card_w, card_h, 12, 12)
+
     # IL 大字
     painter.setPen(QColor("#667eea"))
     painter.setFont(QFont("Segoe UI", 56, QFont.Bold))
     fm = QFontMetrics(painter.font())
     text = "IL"
-    x = (pixmap.width() - fm.horizontalAdvance(text)) // 2
-    painter.drawText(x, 110, text)
-    
+    x = card_x + (card_w - fm.horizontalAdvance(text)) // 2
+    painter.drawText(x, card_y + 100, text)
+
     # Immersive Loudness
     painter.setPen(QColor("#a0b4e8"))
     painter.setFont(QFont("Segoe UI", 14, QFont.Bold))
     fm = QFontMetrics(painter.font())
     text = "Immersive Loudness"
-    x = (pixmap.width() - fm.horizontalAdvance(text)) // 2
-    painter.drawText(x, 150, text)
-    
+    x = card_x + (card_w - fm.horizontalAdvance(text)) // 2
+    painter.drawText(x, card_y + 145, text)
+
     # 版本号
     painter.setPen(QColor("#667eea"))
     painter.setFont(QFont("Segoe UI", 10))
     fm = QFontMetrics(painter.font())
     text = "v1.0  (build 260603)"
-    x = (pixmap.width() - fm.horizontalAdvance(text)) // 2
-    painter.drawText(x, 180, text)
-    
+    x = card_x + (card_w - fm.horizontalAdvance(text)) // 2
+    painter.drawText(x, card_y + 175, text)
+
+    # © 2026 YOYH All Rights Reserved
+    painter.setPen(QColor("#8899cc"))
+    painter.setFont(QFont("Segoe UI", 9))
+    fm = QFontMetrics(painter.font())
+    text = "\u00a9 2026 YOYH All Rights Reserved"
+    x = card_x + (card_w - fm.horizontalAdvance(text)) // 2
+    painter.drawText(x, card_y + 205, text)
+
     # Loading...
     painter.setPen(QColor("#8899cc"))
     painter.setFont(QFont("Segoe UI", 9))
     fm = QFontMetrics(painter.font())
     text = "Loading..."
-    x = (pixmap.width() - fm.horizontalAdvance(text)) // 2
-    painter.drawText(x, 230, text)
-    
+    x = card_x + (card_w - fm.horizontalAdvance(text)) // 2
+    painter.drawText(x, card_y + 250, text)
+
     painter.end()
-    
+
     splash = QSplashScreen(pixmap, Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
     splash.show()
     app.processEvents()
