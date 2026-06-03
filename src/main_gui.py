@@ -2516,15 +2516,22 @@ def _show_splash(app):
         bg_pixmap = QPixmap(800, 600)
         bg_pixmap.fill(QColor("#0f0f23"))
 
-    # 使用背景图尺寸创建 splash
-    pixmap = QPixmap(bg_pixmap.size())
-    painter = QPainter(pixmap)
-    painter.drawPixmap(0, 0, bg_pixmap)
-
-    # 卡片尺寸与位置（居中）
+    # Splash 窗口尺寸（只比卡片大一小圈）
+    splash_w, splash_h = 440, 300
     card_w, card_h = 420, 280
-    card_x = (pixmap.width() - card_w) // 2
-    card_y = (pixmap.height() - card_h) // 2
+
+    # 截取背景图左下角 440×300
+    src_x = 0
+    src_y = max(0, bg_pixmap.height() - splash_h)
+    bg_source = bg_pixmap.copy(src_x, src_y, min(splash_w, bg_pixmap.width()), min(splash_h, bg_pixmap.height()))
+
+    pixmap = QPixmap(splash_w, splash_h)
+    painter = QPainter(pixmap)
+    painter.drawPixmap(0, 0, bg_source)
+
+    # 卡片居中
+    card_x = (splash_w - card_w) // 2
+    card_y = (splash_h - card_h) // 2
 
     # 60% 透明卡片背景
     painter.setPen(Qt.NoPen)
