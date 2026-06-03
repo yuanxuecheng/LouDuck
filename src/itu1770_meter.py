@@ -467,6 +467,7 @@ class ITU1770Meter:
             'max_short_term': max_short_term,
             'max_momentary': max_momentary,
             'blocks': blocks_loudness,
+            'short_term_curve': short_term_values_1s,
         }
         self._cb(progress_callback, "测量完成", 100.0)
         return result

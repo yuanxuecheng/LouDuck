@@ -68,6 +68,118 @@ from mono_channel_matcher import (
 )
 
 
+class LoudnessCurveWidget(QWidget):
+    """短时响度/时间曲线图（QPainter 自绘）"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(220)
+        self.setMaximumHeight(260)
+        self.values: list = []
+        self.duration: float = 0.0
+        self.target_lufs: float = -23.0
+        self.y_min: float = -50.0
+        self.y_max: float = 0.0
+
+    def set_data(self, values, duration, target_lufs):
+        self.values = list(values) if values else []
+        self.duration = float(duration) if duration else 0.0
+        self.target_lufs = float(target_lufs)
+        self.update()
+
+    def paintEvent(self, event):
+        from PySide6.QtGui import QPainter, QPen, QColor
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        w, h = self.width(), self.height()
+        margin_left, margin_right = 50, 15
+        margin_top, margin_bottom = 15, 30
+        chart_w = w - margin_left - margin_right
+        chart_h = h - margin_top - margin_bottom
+
+        # 背景
+        painter.fillRect(self.rect(), QColor("#1a1a2e"))
+        painter.fillRect(margin_left, margin_top, chart_w, chart_h, QColor("#16213e"))
+
+        if not self.values or self.duration <= 0:
+            painter.setPen(QColor("#888"))
+            painter.drawText(self.rect(), Qt.AlignCenter, self.tr("等待测量数据..."))
+            painter.end()
+            return
+
+        # Y 轴网格线与刻度
+        y_steps = 5  # -50, -40, -30, -20, -10, 0
+        for i in range(y_steps + 1):
+            y_val = self.y_min + i * (self.y_max - self.y_min) / y_steps
+            y_pos = margin_top + chart_h - (y_val - self.y_min) / (self.y_max - self.y_min) * chart_h
+            painter.setPen(QPen(QColor("#333333"), 1, Qt.DashLine))
+            painter.drawLine(margin_left, int(y_pos), margin_left + chart_w, int(y_pos))
+            painter.setPen(QColor("#aaa"))
+            painter.drawText(5, int(y_pos) - 6, 40, 12, Qt.AlignRight | Qt.AlignVCenter, f"{int(y_val)}")
+
+        # X 轴网格线与刻度
+        x_ticks = self._calc_x_ticks(self.duration)
+        for t in x_ticks:
+            x_pos = margin_left + t / self.duration * chart_w
+            painter.setPen(QPen(QColor("#333333"), 1, Qt.DashLine))
+            painter.drawLine(int(x_pos), margin_top, int(x_pos), margin_top + chart_h)
+            painter.setPen(QColor("#aaa"))
+            painter.drawText(int(x_pos) - 20, margin_top + chart_h + 5, 40, 20, Qt.AlignCenter, f"{t}s")
+
+        # 目标响度水平线
+        if self.y_min <= self.target_lufs <= self.y_max:
+            y_target = margin_top + chart_h - (self.target_lufs - self.y_min) / (self.y_max - self.y_min) * chart_h
+            painter.setPen(QPen(QColor("#f39c12"), 1.5, Qt.DashLine))
+            painter.drawLine(margin_left, int(y_target), margin_left + chart_w, int(y_target))
+            painter.setPen(QColor("#f39c12"))
+            painter.drawText(margin_left + chart_w - 55, int(y_target) - 14, 55, 12, Qt.AlignRight,
+                             f"Target {self.target_lufs:.0f}")
+
+        # 折线
+        pen = QPen(QColor("#3498db"), 1.5)
+        painter.setPen(pen)
+        n = len(self.values)
+        points = []
+        for i, v in enumerate(self.values):
+            if v == float('-inf') or v < self.y_min:
+                v = self.y_min
+            elif v > self.y_max:
+                v = self.y_max
+            x = margin_left + (i / max(self.duration, 1)) * chart_w
+            y = margin_top + chart_h - (v - self.y_min) / (self.y_max - self.y_min) * chart_h
+            points.append((x, y))
+
+        for i in range(len(points) - 1):
+            painter.drawLine(int(points[i][0]), int(points[i][1]),
+                             int(points[i + 1][0]), int(points[i + 1][1]))
+
+        # 轴标签
+        painter.setPen(QColor("#ccc"))
+        painter.drawText(2, h // 2 - 30, 12, 60, Qt.AlignCenter | Qt.TextWordWrap, "LUFS")
+        painter.drawText(w // 2 - 30, h - 14, 60, 14, Qt.AlignCenter, self.tr("时间 (s)"))
+
+        painter.end()
+
+    def _calc_x_ticks(self, duration):
+        if duration <= 60:
+            step = 10
+        elif duration <= 300:
+            step = 30
+        elif duration <= 600:
+            step = 60
+        else:
+            step = 120
+        ticks = [0]
+        t = step
+        while t < duration:
+            ticks.append(t)
+            t += step
+        if duration > 0 and (not ticks or abs(ticks[-1] - duration) > 3):
+            ticks.append(int(duration))
+        return ticks
+
+
 class ExportOptionsDialog(QDialog):
     def __init__(self, has_detailed, parent=None):
         super().__init__(parent)
@@ -273,7 +385,8 @@ class DetailedMeasurementWorker(QThread):
                 'sample_rate': sr,
                 'channels': num_channels,
                 'processing_time': time.time() - start_time,
-                'detailed_data': detailed_data
+                'detailed_data': detailed_data,
+                'short_term_curve': result.get('short_term_curve', []),
             }
             
             self.sub_step.emit(self.tr("完成"), 100)
@@ -1538,12 +1651,16 @@ class LoudnessMeterApp(QMainWindow):
         export_layout.addWidget(export_note)
         
         layout.addWidget(export_box)
-        
+
+        # 短时响度/时间曲线图
+        self.loudness_curve = LoudnessCurveWidget()
+        layout.addWidget(self.loudness_curve)
+
         self.status = QLabel(self.tr("就绪"))
         self.status.setAlignment(Qt.AlignCenter)
         self.status.setStyleSheet("color: #888; font-size: 11px;")
         layout.addWidget(self.status)
-        
+
         layout.addStretch()
         return panel
     
@@ -1638,6 +1755,8 @@ class LoudnessMeterApp(QMainWindow):
             self.atmos_render_group.setVisible(False)
         if hasattr(self, 'mono_files_group'):
             self.mono_files_group.setVisible(False)
+        if hasattr(self, 'loudness_curve'):
+            self.loudness_curve.set_data([], 0.0, -23.0)
 
 
     
@@ -1901,6 +2020,12 @@ class LoudnessMeterApp(QMainWindow):
         self.export_excel_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
 
+        # 更新短时响度曲线图
+        curve_data = results.get('short_term_curve', [])
+        duration = results.get('duration', 0.0)
+        if curve_data and duration > 0:
+            self.loudness_curve.set_data(curve_data, duration, std.integrated_target)
+
     def stop_measure(self):
         """停止当前测量线程"""
         if self.worker and self.worker.isRunning():
@@ -1928,6 +2053,8 @@ class LoudnessMeterApp(QMainWindow):
         self.export_txt_btn.setEnabled(False)
         self.export_json_btn.setEnabled(False)
         self.export_excel_btn.setEnabled(False)
+        if hasattr(self, 'loudness_curve'):
+            self.loudness_curve.set_data([], 0.0, -23.0)
 
     def on_error(self, msg):
         self.progress.setVisible(False)
