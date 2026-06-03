@@ -93,14 +93,14 @@ class LoudnessCurveWidget(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
 
         w, h = self.width(), self.height()
-        margin_left, margin_right = 50, 15
+        margin_left, margin_right = 58, 15
         margin_top, margin_bottom = 15, 30
         chart_w = w - margin_left - margin_right
         chart_h = h - margin_top - margin_bottom
 
-        # 背景
-        painter.fillRect(self.rect(), QColor("#1a1a2e"))
-        painter.fillRect(margin_left, margin_top, chart_w, chart_h, QColor("#16213e"))
+        # 背景（60% 透明度）
+        painter.fillRect(self.rect(), QColor(26, 26, 46, 153))
+        painter.fillRect(margin_left, margin_top, chart_w, chart_h, QColor(22, 33, 62, 153))
 
         if not self.values or self.duration <= 0:
             painter.setPen(QColor("#888"))
@@ -163,7 +163,7 @@ class LoudnessCurveWidget(QWidget):
 
         # 轴标签
         painter.setPen(QColor("#ccc"))
-        painter.drawText(2, h // 2 - 30, 12, 60, Qt.AlignCenter | Qt.TextWordWrap, "LKFS")
+        painter.drawText(2, h // 2 - 36, 16, 72, Qt.AlignCenter | Qt.TextWordWrap, "LKFS")
         painter.drawText(w // 2 - 30, h - 14, 60, 14, Qt.AlignCenter, self.tr("时间 (s)"))
 
         painter.end()
