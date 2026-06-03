@@ -93,7 +93,7 @@ class LoudnessCurveWidget(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
 
         w, h = self.width(), self.height()
-        margin_left, margin_right = 44, 15
+        margin_left, margin_right = 34, 15
         margin_top, margin_bottom = 15, 42
         chart_w = w - margin_left - margin_right
         chart_h = h - margin_top - margin_bottom
@@ -116,13 +116,13 @@ class LoudnessCurveWidget(QWidget):
             painter.setPen(QPen(QColor("#333333"), 1, Qt.DashLine))
             painter.drawLine(margin_left, int(y_pos), margin_left + chart_w, int(y_pos))
             painter.setPen(QColor("#aaa"))
-            painter.drawText(8, int(y_pos) - 6, 34, 12, Qt.AlignRight | Qt.AlignVCenter, f"{int(y_val)}")
+            painter.drawText(2, int(y_pos) - 6, 30, 12, Qt.AlignRight | Qt.AlignVCenter, f"{int(y_val)}")
 
         # 目标响度值在纵轴上额外标出（橙色）
         if self.y_min <= self.target_lufs <= self.y_max:
             y_target_pos = margin_top + chart_h - (self.target_lufs - self.y_min) / (self.y_max - self.y_min) * chart_h
             painter.setPen(QColor("#f39c12"))
-            painter.drawText(8, int(y_target_pos) - 6, 34, 12, Qt.AlignRight | Qt.AlignVCenter,
+            painter.drawText(2, int(y_target_pos) - 6, 30, 12, Qt.AlignRight | Qt.AlignVCenter,
                              f"{self.target_lufs:.0f}")
 
         # X 轴网格线与刻度
@@ -132,7 +132,7 @@ class LoudnessCurveWidget(QWidget):
             painter.setPen(QPen(QColor("#333333"), 1, Qt.DashLine))
             painter.drawLine(int(x_pos), margin_top, int(x_pos), margin_top + chart_h)
             painter.setPen(QColor("#aaa"))
-            painter.drawText(int(x_pos) - 20, margin_top + chart_h + 4, 40, 16, Qt.AlignCenter, f"{t}s")
+            painter.drawText(int(x_pos) - 20, margin_top + chart_h + 2, 40, 12, Qt.AlignCenter, f"{t}s")
 
         # 目标响度水平线
         if self.y_min <= self.target_lufs <= self.y_max:
@@ -164,7 +164,7 @@ class LoudnessCurveWidget(QWidget):
         # 轴标签
         painter.setPen(QColor("#ccc"))
         painter.drawText(0, h // 2 - 40, 6, 80, Qt.AlignCenter, "L\nK\nF\nS")
-        painter.drawText(w // 2 - 30, h - 8, 60, 14, Qt.AlignCenter, self.tr("时间 (s)"))
+        painter.drawText(w // 2 - 30, h - 22, 60, 12, Qt.AlignCenter, self.tr("时间 (s)"))
 
         painter.end()
 
@@ -1487,7 +1487,7 @@ class LoudnessMeterApp(QMainWindow):
         left_info = QVBoxLayout()
         left_info.setSpacing(0)
         left_info.setAlignment(Qt.AlignLeft | Qt.AlignBottom)
-        for line_text in ["Channel auto-match", "ADM analysis and render", "Excel export"]:
+        for line_text in ["File type auto-detection", "Channel auto-match", "ADM analysis and render", "Excel export"]:
             lbl = QLabel(line_text)
             lbl.setStyleSheet('color: #8899cc; font-size: 8px; font-family: "Segoe UI", sans-serif; border: none;')
             left_info.addWidget(lbl)
@@ -2536,7 +2536,7 @@ def _show_splash(app):
     painter.setPen(QColor("#667eea"))
     painter.setFont(QFont("Segoe UI", 10))
     fm = QFontMetrics(painter.font())
-    text = "v1.0  (build 260526)"
+    text = "v1.0  (build 260603)"
     x = (pixmap.width() - fm.horizontalAdvance(text)) // 2
     painter.drawText(x, 180, text)
     
