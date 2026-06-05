@@ -2600,6 +2600,48 @@ def _show_splash(app):
     return splash
 
 
+def ensure_single_instance(app):
+    """单实例守护：已有实例在运行时激活它并退出当前进程"""
+    from PySide6.QtNetwork import QLocalServer, QLocalSocket
+    from PySide6.QtWidgets import QApplication, QMainWindow
+
+    socket_name = "ImmersiveLoudness_SingleInstance"
+
+    # 尝试连接已有实例
+    socket = QLocalSocket()
+    socket.connectToServer(socket_name)
+    if socket.waitForConnected(500):
+        socket.write(b"activate")
+        socket.flush()
+        socket.waitForBytesWritten(500)
+        socket.disconnectFromServer()
+        return False
+
+    # 无已有实例，创建本地服务器
+    server = QLocalServer()
+    server.removeServer(socket_name)
+    if not server.listen(socket_name):
+        return False
+
+    # 防止被垃圾回收
+    app._single_instance_server = server
+
+    def on_new_connection():
+        conn = server.nextPendingConnection()
+        if conn and conn.waitForReadyRead(500):
+            data = conn.readAll().data()
+            if data == b"activate":
+                for widget in QApplication.topLevelWidgets():
+                    if isinstance(widget, QMainWindow):
+                        widget.showNormal()
+                        widget.raise_()
+                        widget.activateWindow()
+                        break
+
+    server.newConnection.connect(on_new_connection)
+    return True
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser()
@@ -2608,7 +2650,12 @@ def main():
     
     app = QApplication([sys.argv[0]] + remaining)
     app.setStyle('Fusion')
-    
+
+    # 单实例检查
+    if not ensure_single_instance(app):
+        print("[INFO] Another instance is already running. Activating it.")
+        sys.exit(0)
+
     # 显示启动画面（必须在重模块导入之前，让用户立刻看到反馈）
     splash = _show_splash(app)
     
