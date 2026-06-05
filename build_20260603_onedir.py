@@ -245,10 +245,20 @@ def build_executable():
     build_dir = project_dir / 'build'
     dist_dir = project_dir / 'dist'
     
+    def _remove_readonly(func, path, exc):
+        import stat
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+
     for d in [build_dir, dist_dir]:
         if d.exists():
-            shutil.rmtree(d)
-            print(f"[OK] Cleaned: {d}")
+            try:
+                shutil.rmtree(d, onexc=_remove_readonly)
+                print(f"[OK] Cleaned: {d}")
+            except PermissionError as e:
+                print(f"[ERR] Cannot remove {d}: {e}")
+                print("      请检查是否有程序实例正在运行，或手动删除该目录后重试。")
+                return False
     
     build_dir.mkdir(exist_ok=True)
     dist_dir.mkdir(exist_ok=True)
