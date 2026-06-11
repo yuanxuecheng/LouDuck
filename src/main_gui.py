@@ -1464,17 +1464,15 @@ class LoudnessMeterApp(QMainWindow):
         header_layout.setSpacing(3)
         header_layout.setAlignment(Qt.AlignCenter)
         
-        # 咿呀服了吗
-        il_label = QLabel(self.tr("Louduck"))
-        il_label.setStyleSheet('color: #667eea; font-size: 10px; font-weight: thin; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; letter-spacing: 10px; border: none;')
-        il_label.setAlignment(Qt.AlignCenter)
-        header_layout.addWidget(il_label)
-
-        # LD
-        il_label = QLabel('LD')
-        il_label.setStyleSheet('color: #667eea; font-size: 64px; font-weight: bold; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; letter-spacing: 12px; border: none;')
-        il_label.setAlignment(Qt.AlignCenter)
-        header_layout.addWidget(il_label)
+        # Logo 图片
+        from PySide6.QtGui import QPixmap
+        logo_label = QLabel()
+        logo_pixmap = QPixmap(str(_get_resource_path("assets/centerlogo.png")))
+        if not logo_pixmap.isNull():
+            logo_pixmap = logo_pixmap.scaled(280, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            logo_label.setPixmap(logo_pixmap)
+        logo_label.setAlignment(Qt.AlignCenter)
+        header_layout.addWidget(logo_label)
         
         # Immersive Loudness
         name_label = QLabel('Immersive audio file Loudness measure tool')
@@ -2553,21 +2551,22 @@ def _show_splash(app):
     painter.setBrush(Qt.NoBrush)
     painter.drawRoundedRect(card_x, card_y, card_w, card_h, 12, 12)
 
-    # LD 大字
-    painter.setPen(QColor("#667eea"))
-    painter.setFont(QFont("Segoe UI", 56, QFont.Bold))
-    fm = QFontMetrics(painter.font())
-    text = "LD"
-    x = card_x + (card_w - fm.horizontalAdvance(text)) // 2
-    painter.drawText(x, card_y + 100, text)
-
-    # Louduck
-    painter.setPen(QColor("#a0b4e8"))
-    painter.setFont(QFont("Segoe UI", 14, QFont.Bold))
-    fm = QFontMetrics(painter.font())
-    text = "Louduck"
-    x = card_x + (card_w - fm.horizontalAdvance(text)) // 2
-    painter.drawText(x, card_y + 145, text)
+    # Logo 图片
+    logo_path = str(_get_resource_path("assets/centerlogo.png"))
+    logo = QPixmap(logo_path)
+    if not logo.isNull():
+        # 缩放至适合卡片宽度（最大 300px 宽）
+        logo_w = min(300, logo.width())
+        logo_h = int(logo.height() * (logo_w / logo.width()))
+        logo = logo.scaled(logo_w, logo_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        logo_x = card_x + (card_w - logo_w) // 2
+        logo_y = card_y + 20
+        painter.drawPixmap(logo_x, logo_y, logo)
+    else:
+        # 回退：文字
+        painter.setPen(QColor("#667eea"))
+        painter.setFont(QFont("Segoe UI", 56, QFont.Bold))
+        painter.drawText(card_x + (card_w - 60) // 2, card_y + 100, "LD")
 
     # 版本号
     painter.setPen(QColor("#667eea"))
