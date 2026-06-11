@@ -594,7 +594,7 @@ class ADMRenderWorker(QThread):
 class LoudnessMeterApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Immersive Loudness")
+        self.setWindowTitle("Louduck")
         self.setMinimumSize(1280, 620)
         self.resize(1280, 650)
         
@@ -739,8 +739,9 @@ class LoudnessMeterApp(QMainWindow):
                 lines.append(self.tr("⚠️ 包含 {count} 个动态对象 (Object)").format(count=len(objects_ch)))
                 self.atmos_render_group.setVisible(True)
                 self.atmos_render_label.setText(
-                    self.tr("检测到 {count} 个动态对象，可选择渲染到目标声道布局后，点击“渲染并测量”测量。\n"
-                            "注意：点击中间面板“开始测量”将仅测量声道响度，不包含对象。").format(count=len(objects_ch))
+                    self.tr("⚠️ 检测到 {count} 个动态对象，可选择渲染到目标声道布局后，点击“渲染并测量”测量。\n"
+                            "⚠️ 点击中间面板“开始测量”将仅测量声道响度，不包含对象。\n"
+                            "⚠️ 本软件使用EAR（EBU ADM Renderer）作为渲染器，渲染结果可能与Dolby或Audio Vivid存在差异，渲染后的响度测量结果仅供参考。").format(count=len(objects_ch))
                 )
             else:
                 self.atmos_render_group.setVisible(False)
@@ -1464,13 +1465,13 @@ class LoudnessMeterApp(QMainWindow):
         header_layout.setAlignment(Qt.AlignCenter)
         
         # 咿呀服了吗
-        il_label = QLabel(self.tr("Immersive Loudness"))
+        il_label = QLabel(self.tr("Louduck"))
         il_label.setStyleSheet('color: #667eea; font-size: 10px; font-weight: thin; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; letter-spacing: 10px; border: none;')
         il_label.setAlignment(Qt.AlignCenter)
         header_layout.addWidget(il_label)
 
-        # IL
-        il_label = QLabel('IL')
+        # LD
+        il_label = QLabel('LD')
         il_label.setStyleSheet('color: #667eea; font-size: 64px; font-weight: bold; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; letter-spacing: 12px; border: none;')
         il_label.setAlignment(Qt.AlignCenter)
         header_layout.addWidget(il_label)
@@ -2552,19 +2553,19 @@ def _show_splash(app):
     painter.setBrush(Qt.NoBrush)
     painter.drawRoundedRect(card_x, card_y, card_w, card_h, 12, 12)
 
-    # IL 大字
+    # LD 大字
     painter.setPen(QColor("#667eea"))
     painter.setFont(QFont("Segoe UI", 56, QFont.Bold))
     fm = QFontMetrics(painter.font())
-    text = "IL"
+    text = "LD"
     x = card_x + (card_w - fm.horizontalAdvance(text)) // 2
     painter.drawText(x, card_y + 100, text)
 
-    # Immersive Loudness
+    # Louduck
     painter.setPen(QColor("#a0b4e8"))
     painter.setFont(QFont("Segoe UI", 14, QFont.Bold))
     fm = QFontMetrics(painter.font())
-    text = "Immersive Loudness"
+    text = "Louduck"
     x = card_x + (card_w - fm.horizontalAdvance(text)) // 2
     painter.drawText(x, card_y + 145, text)
 
@@ -2605,7 +2606,7 @@ def ensure_single_instance(app):
     from PySide6.QtNetwork import QLocalServer, QLocalSocket
     from PySide6.QtWidgets import QApplication, QMainWindow
 
-    socket_name = "ImmersiveLoudness_SingleInstance"
+    socket_name = "Louduck_SingleInstance"
 
     # 尝试连接已有实例
     socket = QLocalSocket()

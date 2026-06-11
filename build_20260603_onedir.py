@@ -193,7 +193,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='ImmersiveLoudness',
+    name='Louduck',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -217,7 +217,7 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='ImmersiveLoudness',
+    name='Louduck',
 )
 '''
     
@@ -282,7 +282,7 @@ def build_executable():
         if result.stderr:
             print("警告/信息:", result.stderr)
         
-        exe_path = dist_dir / 'ImmersiveLoudness' / 'ImmersiveLoudness.exe'
+        exe_path = dist_dir / 'Louduck' / 'Louduck.exe'
         if exe_path.exists():
             dir_size = sum(f.stat().st_size for f in (dist_dir / 'ImmersiveLoudness').rglob('*') if f.is_file())
             size_mb = dir_size / (1024 * 1024)
@@ -290,9 +290,9 @@ def build_executable():
             print("=" * 60)
             print("[OK] Build success!")
             print("=" * 60)
-            print(f"  输出目录: {dist_dir / 'ImmersiveLoudness'}")
+            print(f"  输出目录: {dist_dir / 'Louduck'}")
             print(f"  总大小:   {size_mb:.1f} MB")
-            print(f"  启动方式: 双击 ImmersiveLoudness.exe")
+            print(f"  启动方式: 双击 Louduck.exe")
             print()
             return True
         else:
@@ -328,7 +328,7 @@ echo 安装目录: %INSTALL_DIR%
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
 
 echo 复制文件...
-xcopy /E /I /Y "ImmersiveLoudness" "%INSTALL_DIR%"
+xcopy /E /I /Y "Louduck" "%INSTALL_DIR%"
 if errorlevel 1 (
     echo 复制失败！
     pause
@@ -336,12 +336,12 @@ if errorlevel 1 (
 )
 
 echo 创建桌面快捷方式...
-set SHORTCUT="%USERPROFILE%\\Desktop\\ImmersiveLoudness.lnk"
-powershell -Command "$WshShell = New-Object -ComObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut('%SHORTCUT%'); $Shortcut.TargetPath = '%INSTALL_DIR%\\ImmersiveLoudness.exe'; $Shortcut.WorkingDirectory = '%INSTALL_DIR%'; $Shortcut.IconLocation = '%INSTALL_DIR%\\ImmersiveLoudness.exe,0'; $Shortcut.Save()"
+set SHORTCUT="%USERPROFILE%\\Desktop\\Louduck.lnk"
+powershell -Command "$WshShell = New-Object -ComObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut('%SHORTCUT%'); $Shortcut.TargetPath = '%INSTALL_DIR%\\Louduck.exe'; $Shortcut.WorkingDirectory = '%INSTALL_DIR%'; $Shortcut.IconLocation = '%INSTALL_DIR%\\Louduck.exe,0'; $Shortcut.Save()"
 
 echo 创建开始菜单快捷方式...
-set STARTMENU="%ProgramData%\\Microsoft\\Windows\\Start Menu\\Programs\\ImmersiveLoudness.lnk"
-powershell -Command "$WshShell = New-Object -ComObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut('%STARTMENU%'); $Shortcut.TargetPath = '%INSTALL_DIR%\\ImmersiveLoudness.exe'; $Shortcut.WorkingDirectory = '%INSTALL_DIR%'; $Shortcut.IconLocation = '%INSTALL_DIR%\\ImmersiveLoudness.exe,0'; $Shortcut.Save()"
+set STARTMENU="%ProgramData%\\Microsoft\\Windows\\Start Menu\\Programs\\Louduck.lnk"
+powershell -Command "$WshShell = New-Object -ComObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut('%STARTMENU%'); $Shortcut.TargetPath = '%INSTALL_DIR%\\Louduck.exe'; $Shortcut.WorkingDirectory = '%INSTALL_DIR%'; $Shortcut.IconLocation = '%INSTALL_DIR%\\Louduck.exe,0'; $Shortcut.Save()"
 
 echo.
 echo ==========================================
@@ -351,7 +351,7 @@ echo.
 echo 您可以通过以下方式启动程序:
 echo   - 桌面快捷方式
 echo   - 开始菜单
-echo   - 直接运行: %INSTALL_DIR%\\ImmersiveLoudness.exe
+echo   - 直接运行: %INSTALL_DIR%\\Louduck.exe
 echo.
 pause
 '''
@@ -390,9 +390,9 @@ def main():
         print("=" * 60)
         print()
         print("输出目录:")
-        print("  dist/ImmersiveLoudness/        - 主程序目录（可直接运行）")
-        print("  dist/ImmersiveLoudness.exe     - 不存在（onedir 模式）")
-        print("  install.bat                     - 安装脚本（可选）")
+        print("  dist/Louduck/        - 主程序目录（可直接运行）")
+        print("  dist/Louduck.exe     - 不存在（onedir 模式）")
+        print("  install.bat           - 安装脚本（可选）")
         print()
         print("分发方式:")
         print("  1. 压缩 dist/ImmersiveLoudness/ 为 zip 直接分发")
