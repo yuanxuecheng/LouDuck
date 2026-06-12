@@ -1,8 +1,0 @@
-name: test
-on: [push]
-jobs:
-  test:
-    runs-on: ubuntu-latest 
-    steps:
-      - uses: actions/chechout@v4 
-      - run: echo Hello 
