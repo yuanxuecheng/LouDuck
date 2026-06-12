@@ -1,8 +1,8 @@
-name: test
+name: Test
 on: [push]
 jobs:
   test:
-    runs-on: ubuntu-latest 
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/chechout@v4 
-      - run: echo Hello 
+      - uses: actions/checkout@v4
+      - run: echo Hello
