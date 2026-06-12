@@ -1,0 +1,51 @@
+name: Build macOS Apple Silicon
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-arm64:
+    runs-on: macos-14  # Apple Silicon runner (M1)
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Install dependencies
+        run: |
+          pip install PySide6 numpy scipy soundfile openpyxl
+          pip install git+https://github.com/ebu/ebu_adm_renderer.git
+          pip install pyinstaller
+      
+      - name: Build
+        run: |
+          pyinstaller \
+            --windowed \
+            --target-arch arm64 \
+            --name "ImmersiveLoudness" \
+            --icon "assets/icon.icns" \
+            --hidden-import=ear \
+            --hidden-import=scipy.special._cdflib \
+            --add-data "src/renderers:renderers" \
+            --add-data "assets:assets" \
+            --add-data "$(python -c 'import ear; print(ear.__path__[0])'):ear" \
+            src/main_gui.py
+      
+      - name: Sign
+        run: codesign --force --deep --sign - dist/ImmersiveLoudness.app
+      
+      - name: Package
+        run: |
+          cd dist
+          zip -r ImmersiveLoudness-macOS-AppleSilicon.zip ImmersiveLoudness.app
+      
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ImmersiveLoudness-macOS-AppleSilicon
+          path: dist/ImmersiveLoudness-macOS-AppleSilicon.zip
