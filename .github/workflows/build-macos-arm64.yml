@@ -40,8 +40,16 @@ jobs:
       
       - name: Set app version to 1.0.0
         run: |
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.0.0" dist/LouDuck.app/Contents/Info.plist
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 1.0.0" dist/LouDuck.app/Contents/Info.plist
+          python3 - <<'PY'
+          import plistlib
+          p = 'dist/LouDuck.app/Contents/Info.plist'
+          with open(p, 'rb') as f:
+              d = plistlib.load(f)
+          d['CFBundleShortVersionString'] = '1.0.0'
+          d['CFBundleVersion'] = '1.0.0'
+          with open(p, 'wb') as f:
+              plistlib.dump(d, f)
+          PY
 
       - name: Sign
         run: codesign --force --deep --sign - dist/LouDuck.app
