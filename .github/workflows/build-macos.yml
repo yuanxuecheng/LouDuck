@@ -27,25 +27,32 @@ jobs:
         run: |
           pyinstaller \
             --windowed \
-            --name "ImmersiveLoudness" \
+            --name "LouDuck" \
             --icon "assets/icon.icns" \
             --hidden-import=ear \
             --hidden-import=scipy.special._cdflib \
             --add-data "src/renderers:renderers" \
             --add-data "assets:assets" \
+            --add-data "i18n:i18n" \
             --add-data "$(python -c 'import ear; print(ear.__path__[0])'):ear" \
+            --add-data "$(python -c 'import PySide6, os; print(os.path.join(os.path.dirname(PySide6.__file__), "Qt", "plugins", "styles"))'):PySide6/Qt/plugins/styles" \
             src/main_gui.py
       
+      - name: Set app version to 1.0.0
+        run: |
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.0.0" dist/LouDuck.app/Contents/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 1.0.0" dist/LouDuck.app/Contents/Info.plist
+
       - name: Sign
-        run: codesign --force --deep --sign - dist/ImmersiveLoudness.app
+        run: codesign --force --deep --sign - dist/LouDuck.app
       
       - name: Package
         run: |
           cd dist
-          zip -r ImmersiveLoudness-macOS-Intel.zip ImmersiveLoudness.app
+          zip -r LouDuck-macOS-Intel.zip LouDuck.app
       
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ImmersiveLoudness-macOS-Intel
-          path: dist/ImmersiveLoudness-macOS-Intel.zip
+          name: LouDuck-macOS-Intel
+          path: dist/LouDuck-macOS-Intel.zip
