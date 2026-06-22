@@ -1,4 +1,4 @@
-name: Build macOS Apple Silicon
+name: Build macOS DMG
 
 on:
   push:
@@ -6,8 +6,8 @@ on:
       - 'v*'
 
 jobs:
-  build-arm64:
-    runs-on: macos-14  # Apple Silicon runner (M1)
+  build-arm64-dmg:
+    runs-on: macos-14  # Apple Silicon runner
     steps:
       - uses: actions/checkout@v4
       
@@ -22,7 +22,7 @@ jobs:
           pip install git+https://github.com/ebu/ebu_adm_renderer.git
           pip install pyinstaller
       
-      - name: Build
+      - name: Build App
         run: |
           pyinstaller \
             --windowed \
@@ -33,34 +33,40 @@ jobs:
             --hidden-import=scipy.special._cdflib \
             --add-data "src/renderers:renderers" \
             --add-data "assets:assets" \
-            --add-data "i18n:i18n" \
             --add-data "$(python -c 'import ear; print(ear.__path__[0])'):ear" \
-            --add-data "$(python -c 'import PySide6, os; print(os.path.join(os.path.dirname(PySide6.__file__), "Qt", "plugins", "styles"))'):PySide6/Qt/plugins/styles" \
             src/main_gui.py
       
-      - name: Set app version to 1.0.0
-        run: |
-          python3 - <<'PY'
-          import plistlib
-          p = 'dist/LouDuck.app/Contents/Info.plist'
-          with open(p, 'rb') as f:
-              d = plistlib.load(f)
-          d['CFBundleShortVersionString'] = '1.0.0'
-          d['CFBundleVersion'] = '1.0.0'
-          with open(p, 'wb') as f:
-              plistlib.dump(d, f)
-          PY
-
-      - name: Sign
+      - name: Sign App
         run: codesign --force --deep --sign - dist/LouDuck.app
       
-      - name: Package
+      - name: Create DMG
         run: |
           cd dist
-          zip -r LouDuck-macOS-AppleSilicon.zip LouDuck.app
+          mkdir -p dmg_contents
+          cp -r LouDuck.app dmg_contents/
+          ln -s /Applications dmg_contents/Applications
+          
+          hdiutil create \
+            -volname "LouDuck" \
+            -srcfolder dmg_contents \
+            -ov \
+            -format UDZO \
+            LouDuck-macOS-AppleSilicon.dmg
+          
+          rm -rf dmg_contents
       
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LouDuck-macOS-AppleSilicon
-          path: dist/LouDuck-macOS-AppleSilicon.zip
+          name: LouDuck-macOS-AppleSilicon-DMG
+          path: dist/LouDuck-macOS-AppleSilicon.dmg
+      
+      # 自动发布到 Releases
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: dist/LouDuck-macOS-AppleSilicon.dmg
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
