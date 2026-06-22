@@ -159,6 +159,29 @@
 <context>
     <name>LoudnessMeterApp</name>
     <message>
+        <location filename="../src/main_gui.py" line="865"/>
+        <source>📁 文件导入（随意导）</source>
+        <translation>📁 File Import（EasyImport）</translation>
+    </message>
+    <message>
+        <location filename="../src/main_gui.py" line="894"/>
+        <source>EasyImport 说明</source>
+        <translation>EasyImport Help</translation>
+    </message>
+    <message>
+        <location filename="../src/main_gui.py" line="896"/>
+        <source>EasyImport：
+直接选择任意封装格式待测文件，自动识别
+  ★ 多个单声道——自动完成文件-&gt;声道映射
+  ★ 单个多声道——自动识别内部顺序
+  ★ ADM BWF——解析元数据信息，提供目标声道格式选择及“渲染并测量”功能</source>
+        <translation>EasyImport:
+Select any packaged audio file to be tested; auto-recognition
+  ★ Multiple mono files — automatic file-to-channel mapping
+  ★ Single multichannel file — automatic internal order recognition
+  ★ ADM BWF — parse metadata, provide target channel format selection and &quot;Render &amp; Measure&quot; function</translation>
+    </message>
+    <message>
         <location filename="../src/main_gui.py" line="550"/>
         <source>正在解析 ADM...</source>
         <translation>Parsing ADM...</translation>

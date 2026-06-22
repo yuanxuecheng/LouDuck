@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ImmersiveLoudness 简易备份脚本
+LouDuck 简易备份脚本
 用法: python backup.py [备注]
 效果: 在 backups/ 目录下生成 src-YYYYMMDD-HHMMSS-备注.zip
 """

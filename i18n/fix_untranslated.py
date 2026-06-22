@@ -49,11 +49,11 @@ text = text.replace(old, new, 1)
 # ---------- 5. 标准信息 "目标:" / "峰值:" ----------
 # line 1593-1595
 old = '''self.std_info.setText(
-            f"目标: {std.integrated_target:+.1f} LUFS (±{std.integrated_tolerance:.1f} LU)\\n"
+            f"目标: {std.integrated_target:+.1f} LKFS (±{std.integrated_tolerance:.1f} LU)\\n"
             f"峰值: {std.true_peak_limit:+.1f} dBTP"
         )'''
 new = '''self.std_info.setText(
-            self.tr("目标: {target} LUFS (±{tol} LU)\\n峰值: {peak} dBTP")
+            self.tr("目标: {target} LKFS (±{tol} LU)\\n峰值: {peak} dBTP")
             .format(target=f"{std.integrated_target:+.1f}",
                     tol=f"{std.integrated_tolerance:.1f}",
                     peak=f"{std.true_peak_limit:+.1f}")

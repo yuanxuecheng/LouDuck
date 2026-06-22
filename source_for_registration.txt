@@ -1,0 +1,3008 @@
+软件名称: LouDuck
+总代码行数: 5479
+提交行数: 3001
+================================================================================
+
+"""
+ADM (Audio Definition Model) 解析器
+支持 ITU-R BS.2076 和 BW64 文件格式
+修复：
+- 动态命名空间检测（支持多种ADM标准）
+- 基于规则的声道名称智能识别（支持长描述性名称如RoomCentric）
+- 完整的7.1.4扬声器标签映射
+- 增强的错误处理和调试输出
+- 支持 typeDefinition 和 typeLabel 两种属性
+"""
+
+import re
+import struct
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
+from pathlib import Path
+from typing import List, Dict, Optional, Tuple, Set
+import numpy as np
+
+
+@dataclass
+class ADMTrack:
+    """ADM 音轨信息"""
+    index: int
+    uid: str
+    format_id: str
+    pack_id: str
+
+
+@dataclass
+class ADMChannel:
+    """ADM 声道信息"""
+    id: str
+    name: str
+    type: str  # DirectSpeakers, Objects, HOA, etc.
+    position: Optional[Dict] = None
+    speaker_label: Optional[str] = None
+    is_lfe: bool = False
+
+
+# ============ 配置识别规则引擎 ============
+
+# 各配置的空间特征规则
+CONFIG_RULES = {
+    'stereo': {
+        'required': ['front_left', 'front_right'],
+        'forbidden': ['surround', 'rear', 'top', 'height', 'lfe'],
+        'max_channels': 2,
+        'description': '立体声'
+    },
+    '5.1': {
+        'required': ['front_left', 'front_right', 'front_center', 'lfe', 'surround_left', 'surround_right'],
+        'forbidden': ['top', 'height', 'rear', 'side'],
+        'max_channels': 6,
+        'description': '5.1 环绕声'
+    },
+    '7.1': {
+        'required': ['front_left', 'front_right', 'front_center', 'lfe', 'side_left', 'side_right', 'rear_left', 'rear_right'],
+        'forbidden': ['top', 'height'],
+        'max_channels': 8,
+        'description': '7.1 环绕声'
+    },
+    '5.1.4': {
+        'required': ['front_left', 'front_right', 'front_center', 'lfe', 'surround_left', 'surround_right', 
+                     'top_front_left', 'top_front_right', 'top_rear_left', 'top_rear_right'],
+        'forbidden': ['side', 'rear_bottom'],
+        'max_channels': 10,
+        'description': '5.1.4 沉浸式'
+    },
+    '7.1.4': {
+        'required': ['front_left', 'front_right', 'front_center', 'lfe', 'side_left', 'side_right', 
+                     'rear_left', 'rear_right', 'top_front_left', 'top_front_right', 'top_rear_left', 'top_rear_right'],
+        'forbidden': [],
+        'max_channels': 12,
+        'description': '7.1.4 沉浸式'
+    },
+    '7.1.2': {
+        'required': ['front_left', 'front_right', 'front_center', 'lfe', 'side_left', 'side_right', 
+                     'rear_left', 'rear_right', 'top_front_left', 'top_front_right'],
+        'forbidden': ['top_rear_left', 'top_rear_right'],
+        'max_channels': 10,
+        'description': '7.1.2 沉浸式'
+    }
+}
+
+
+def normalize_channel_name(name: str) -> Optional[str]:
+    """
+    将任意声道名称标准化为空间特征词
+    支持：英文缩写、数字编码、ITU标签、带点号后缀、长描述性名称等
+    """
+    if not name:
+        return None
+    
+    # 清理
+    n = name.upper().strip()
+    
+    # 提取点号后缀（如 "2005.L" → "L"）
+    if '.' in n:
+        parts = n.split('.')
+        suffix = parts[-1]
+        if len(suffix) <= 8:
+            n = suffix
+    
+    # ==== 第一步：检测LFE（最明确）====
+    if 'LFE' in n and 'LEFT' not in n:
+        return 'lfe'
+    
+    # ==== 第二步：检测顶部声道（有TOP/UP/HEIGHT）====
+    if 'TOP' in n or 'UP' in n or 'HEIGHT' in n or 'ELEVATED' in n or 'OVERHEAD' in n:
+        # 顶部 + 前后判断
+        if 'FRONT' in n or 'FWD' in n or 'FORWARD' in n:
+            if 'LEFT' in n or n.endswith(' L') or ' L ' in n:
+                return 'top_front_left'
+            elif 'RIGHT' in n or n.endswith(' R') or ' R ' in n:
+                return 'top_front_right'
+        elif 'REAR' in n or 'BACK' in n or 'REARWARD' in n:
+            if 'LEFT' in n or n.endswith(' L') or ' L ' in n:
+                return 'top_rear_left'
+            elif 'RIGHT' in n or n.endswith(' R') or ' R ' in n:
+                return 'top_rear_right'
+        elif 'CENTER' in n or 'CENTRE' in n or 'MID' in n or 'MIDDLE' in n:
+            return 'top_front_center'
+        else:
+            # 只有TOP + LEFT/RIGHT，无前后 → 默认前（7.1.2特征）
+            if 'LEFT' in n or n.endswith(' L') or ' L ' in n:
+                return 'top_front_left'
+            elif 'RIGHT' in n or n.endswith(' R') or ' R ' in n:
+                return 'top_front_right'
+    
+    # ==== 第三步：检测底层声道 ====
+    
+    # 判断位置特征（优先级：REAR > SIDE > SURROUND > FRONT）
+    has_rear = 'REAR' in n or 'BACK' in n
+    has_side = 'SIDE' in n
+    has_surround = 'SURROUND' in n
+    has_front = not has_rear and not has_side and not has_surround
+    
+    # 判断左右
+    has_left = 'LEFT' in n or n.endswith(' L') or ' L ' in n
+    has_right = 'RIGHT' in n or n.endswith(' R') or ' R ' in n
+    has_center = 'CENTER' in n or 'CENTRE' in n or 'MID' in n or 'MIDDLE' in n
+    
+    # 组合判断
+    if has_front:
+        if has_left and not has_right:
+            return 'front_left'
+        elif has_right and not has_left:
+            return 'front_right'
+        elif has_center:
+            return 'front_center'
+    
+    if has_side and not has_rear:
+        if has_left and not has_right:
+            return 'side_left'
+        elif has_right and not has_left:
+            return 'side_right'
+    
+    if has_rear:
+        if has_left and not has_right:
+            return 'rear_left'
+        elif has_right and not has_left:
+            return 'rear_right'
+    
+    if has_surround and not has_side and not has_rear:
+        if has_left and not has_right:
+            return 'surround_left'
+        elif has_right and not has_left:
+            return 'surround_right'
+    
+    # ==== 第四步：简化名称匹配（短名称/缩写）====
+    # 去除常见前缀后缀
+    n_clean = n
+    for prefix in ['ROOMCENTRIC', 'ROOM', 'CENTRIC', 'CHANNEL', 'CH', 'TRACK', 'TRK', 'SPEAKER', 'SPK']:
+        n_clean = n_clean.replace(prefix, '')
+    n_clean = n_clean.strip()
+    
+    # 单字母/双字母匹配
+    if n_clean == 'L' or n_clean == 'FL' or n_clean == 'LF':
+        return 'front_left'
+    if n_clean == 'R' or n_clean == 'FR' or n_clean == 'RF':
+        return 'front_right'
+    if n_clean == 'C' or n_clean == 'FC':
+        return 'front_center'
+    if n_clean == 'LS' or n_clean == 'SL':
+        return 'surround_left'
+    if n_clean == 'RS' or n_clean == 'SR':
+        return 'surround_right'
+    if n_clean == 'LSS' or n_clean == 'SSL':
+        return 'side_left'
+    if n_clean == 'RSS' or n_clean == 'SSR':
+        return 'side_right'
+    if n_clean == 'LRS' or n_clean == 'SRL':
+        return 'rear_left'
+    if n_clean == 'RRS' or n_clean == 'SRR':
+        return 'rear_right'
+    if n_clean == 'LTF' or n_clean == 'TFL':
+        return 'top_front_left'
+    if n_clean == 'RTF' or n_clean == 'TFR':
+        return 'top_front_right'
+    if n_clean == 'LTR' or n_clean == 'TRL':
+        return 'top_rear_left'
+    if n_clean == 'RTR' or n_clean == 'TRR':
+        return 'top_rear_right'
+    if n_clean == 'LTM' or n_clean == 'TML':
+        return 'top_front_left'
+    if n_clean == 'RTM' or n_clean == 'TMR':
+        return 'top_front_right'
+    if n_clean == 'TC' or n_clean == 'TM' or n_clean == 'TMC':
+        return 'top_front_center'
+    
+    # ==== 第五步：ITU标签匹配 ====
+    if 'M+030' in n or 'M+03' in n:
+        return 'front_left'
+    if 'M-030' in n or 'M-03' in n:
+        return 'front_right'
+    if 'M+000' in n or 'M+00' in n:
+        return 'front_center'
+    if 'M+090' in n or 'M+09' in n:
+        return 'side_left'
+    if 'M-090' in n or 'M-09' in n:
+        return 'side_right'
+    if 'M+110' in n or 'M+11' in n:
+        return 'surround_left'
+    if 'M-110' in n or 'M-11' in n:
+        return 'surround_right'
+    if 'M+135' in n or 'M+13' in n:
+        return 'rear_left'
+    if 'M-135' in n or 'M-13' in n:
+        return 'rear_right'
+    if 'U+045' in n or 'U+04' in n:
+        return 'top_front_left'
+    if 'U-045' in n or 'U-04' in n:
+        return 'top_front_right'
+    if 'U+135' in n or 'U+13' in n:
+        return 'top_rear_left'
+    if 'U-135' in n or 'U-13' in n:
+        return 'top_rear_right'
+    if 'U+000' in n or 'U+00' in n or 'T+000' in n or 'T+00' in n:
+        return 'top_front_center'
+    if 'U+180' in n or 'U+18' in n:
+        return 'top_rear_center'
+    
+    return None
+
+
+def detect_config_by_features(channels: List[ADMChannel]) -> Tuple[str, float, str]:
+    """
+    基于空间特征识别配置
+    返回: (配置名称, 置信度0-1, 描述)
+    """
+    # 收集所有通道的空间特征
+    features: Set[str] = set()
+    
+    for ch in channels:
+        # 优先使用名称/标签识别
+        feature = normalize_channel_name(ch.name) or normalize_channel_name(ch.speaker_label)
+        
+        # 如果名称识别失败，尝试使用位置信息
+        if not feature and ch.position:
+            az = ch.position.get('azimuth', 0)
+            el = ch.position.get('elevation', 0)
+            feature = _position_to_feature(az, el)
+        
+        if feature:
+            features.add(feature)
+    
+    # 计算各配置的匹配度
+    best_config = 'unknown'
+    best_score = -999
+    best_confidence = 0.0
+    
+    for config_name, rules in CONFIG_RULES.items():
+        required = set(rules['required'])
+        forbidden = set(rules['forbidden'])
+        
+        matched_required = len(features & required)
+        missing_required = len(required - features)
+        violated_forbidden = len(features & forbidden)
+        
+        if violated_forbidden > 0:
+            continue
+        
+        score = matched_required * 2 - missing_required
+        
+        ch_count = len(channels)
+        if ch_count > rules['max_channels']:
+            score -= (ch_count - rules['max_channels']) * 3
+        
+        confidence = matched_required / len(required) if len(required) > 0 else 0.0
+        
+        if score > best_score:
+            best_score = score
+            best_config = config_name
+            best_confidence = confidence
+    
+    description = CONFIG_RULES.get(best_config, {}).get('description', '未知')
+    return best_config, best_confidence, description
+
+
+def _position_to_feature(azimuth: float, elevation: float) -> Optional[str]:
+    """将方位角/仰角转换为空间特征词"""
+    az = round(azimuth)
+    el = round(elevation)
+    
+    if el < -20:
+        return 'lfe'
+    
+    if el > 30:
+        if abs(az) <= 45:
+            return 'top_front_center'
+        elif az > 0 and az <= 90:
+            return 'top_front_left'
+        elif az < 0 and az >= -90:
+            return 'top_front_right'
+        elif az > 90 and az <= 180:
+            return 'top_rear_left'
+        elif az < -90 and az >= -180:
+            return 'top_rear_right'
+    
+    if el <= 30:
+        if abs(az) <= 15:
+            return 'front_center'
+        elif az > 15 and az <= 60:
+            return 'front_left'
+        elif az < -15 and az >= -60:
+            return 'front_right'
+        elif abs(az) >= 75 and abs(az) <= 105:
+            return 'side_left' if az > 0 else 'side_right'
+        elif abs(az) >= 120:
+            return 'surround_left' if az > 0 else 'surround_right'
+    
+    return None
+
+
+# ============ ADM 核心类 ============
+
+class ADM:
+    """ADM 元数据模型 (ITU-R BS.2076)"""
+    
+    def __init__(self, axml_data: bytes, chna_data: Optional[bytes] = None):
+        self.axml_data = axml_data
+        self.chna_data = chna_data
+        
+        self.programmes: List[Dict] = []
+        self.contents: List[Dict] = []
+        self.objects: List[Dict] = []
+        self.channel_formats: List[ADMChannel] = []
+        self.track_mappings: List[ADMTrack] = []
+        
+        # 渲染器与创作软件信息 (ITU-R BS.2076-3 §5.8.6)
+        self.renderer_info: Optional[Dict] = None
+        self.authoring_info: Optional[Dict] = None
+        
+        self.ns = {}
+        self.ns_uri = None
+        
+    def _detect_namespace(self, root):
+        """动态检测XML命名空间"""
+        root_tag = root.tag
+        if root_tag.startswith('{'):
+            ns_uri = root_tag.split('}')[0][1:]
+            self.ns_uri = ns_uri
+            self.ns = {'adm': ns_uri}
+            print(f"[ADM解析] 检测到命名空间: {ns_uri}")
+        else:
+            self.ns = {'adm': ''}
+            print("[ADM解析] 无命名空间或空命名空间")
+    
+    def _findall(self, element, path):
+        """安全的查找方法"""
+        if self.ns_uri:
+            return element.findall(path, self.ns)
+        else:
+            local_path = path.replace('adm:', '')
+            return element.findall(local_path)
+    
+    def _find(self, element, path):
+        """安全的单个查找方法"""
+        if self.ns_uri:
+            return element.find(path, self.ns)
+        else:
+            local_path = path.replace('adm:', '')
+            return element.find(local_path)
+    
+    def parse(self):
+        """解析 ADM XML"""
+        try:
+            root = ET.fromstring(self.axml_data.decode('utf-8'))
+            self._detect_namespace(root)
+            
+            print(f"[ADM解析] 根元素: {root.tag}")
+            
+            # 解析 audioProgramme
+            programmes = self._findall(root, './/adm:audioProgramme')
+            print(f"[ADM解析] 找到 {len(programmes)} 个 audioProgramme")
+            for prog in programmes:
+                prog_data = {
+                    'id': prog.get('audioProgrammeID'),
+                    'name': prog.get('audioProgrammeName'),
+                    'content_refs': [ref.text for ref in self._findall(prog, 'adm:audioContentIDRef') if ref.text]
+                }
+                self.programmes.append(prog_data)
+            
+            # 解析 audioContent
+            contents = self._findall(root, './/adm:audioContent')
+            print(f"[ADM解析] 找到 {len(contents)} 个 audioContent")
+            for content in contents:
+                content_data = {
+                    'id': content.get('audioContentID'),
+                    'name': content.get('audioContentName'),
+                    'object_refs': [ref.text for ref in self._findall(content, 'adm:audioObjectIDRef') if ref.text],
+                    'dialogue': content.get('dialogue')
+                }
+                self.contents.append(content_data)
+            
+            # 解析 audioObject
+            objects = self._findall(root, './/adm:audioObject')
+            print(f"[ADM解析] 找到 {len(objects)} 个 audioObject")
+            for obj in objects:
+                obj_data = {
+                    'id': obj.get('audioObjectID'),
+                    'name': obj.get('audioObjectName'),
+                    'gain': float(obj.get('gain', '1.0')),
+                    'mute': obj.get('mute', '0') == '1',
+                    'track_refs': [ref.text for ref in self._findall(obj, 'adm:audioTrackUIDRef') if ref.text],
+                    'pack_refs': [ref.text for ref in self._findall(obj, 'adm:audioPackFormatIDRef') if ref.text]
+                }
+                self.objects.append(obj_data)
+            
+            # 解析 authoringInformation (ITU-R BS.2076-3 §5.8.6)
+            authoring_elements = self._findall(root, './/adm:authoringInformation')
+            if authoring_elements:
+                auth = authoring_elements[0]
+                self.authoring_info = {
+                    'reference_layouts': [],
+                    'renderers': []
+                }
+                
+                # 解析 referenceLayout
+                ref_layouts = self._findall(auth, 'adm:referenceLayout')
+                for rl in ref_layouts:
+                    pack_ref = self._find(rl, 'adm:audioPackFormatIDRef')
+                    if pack_ref is not None and pack_ref.text:
+                        self.authoring_info['reference_layouts'].append(pack_ref.text)
+                
+                # 解析 renderer (ITU-R BS.2076-3 Table A1-52/A1-53)
+                renderers = self._findall(auth, 'adm:renderer')
+                for renderer in renderers:
+                    renderer_data = {
+                        'uri': renderer.get('uri', ''),
+                        'name': renderer.get('name', ''),
+                        'version': renderer.get('version', ''),
+                        'coordinate_mode': renderer.get('coordinateMode', ''),
+                        'pack_format_refs': [ref.text for ref in self._findall(renderer, 'adm:audioPackFormatIDRef') if ref.text],
+                        'object_refs': [ref.text for ref in self._findall(renderer, 'adm:audioObjectIDRef') if ref.text]
+                    }
+                    self.authoring_info['renderers'].append(renderer_data)
+                
+                # 兼容：如果只有一个renderer，也设置到renderer_info
+                if self.authoring_info['renderers']:
+                    self.renderer_info = self.authoring_info['renderers'][0]
+                    print(f"[ADM解析] 检测到渲染器: {self.renderer_info.get('name', 'N/A')} v{self.renderer_info.get('version', 'N/A')}")
+                
+                print(f"[ADM解析] 创作信息: {len(self.authoring_info['reference_layouts'])}个参考布局, {len(self.authoring_info['renderers'])}个渲染器")
+            
+            # === 新增：全局搜索 renderer（部分ADM的renderer不在authoringInformation内）===
+            if not self.renderer_info:
+                all_renderers = self._findall(root, './/adm:renderer')
+                if all_renderers:
+                    for renderer in all_renderers:
+                        renderer_data = {
+                            'uri': renderer.get('uri', ''),
+                            'name': renderer.get('name', ''),
+                            'version': renderer.get('version', ''),
+                            'coordinate_mode': renderer.get('coordinateMode', ''),
+                            'pack_format_refs': [ref.text for ref in self._findall(renderer, 'adm:audioPackFormatIDRef') if ref.text],
+                            'object_refs': [ref.text for ref in self._findall(renderer, 'adm:audioObjectIDRef') if ref.text]
+                        }
+                        if not self.authoring_info:
+                            self.authoring_info = {'reference_layouts': [], 'renderers': []}
+                        self.authoring_info['renderers'].append(renderer_data)
+                    self.renderer_info = self.authoring_info['renderers'][0]
+                    print(f"[ADM解析] 从全局搜索找到渲染器: {self.renderer_info.get('name', 'N/A')}")
+            
+            # === 新增：从 audioProgramme 属性查找 authoringTool / renderer ===
+            if not self.renderer_info:
+                for prog in programmes:
+                    tool = prog.get('authoringTool', '') or prog.get('renderer', '')
+                    if tool:
+                        renderer_data = {
+                            'uri': '',
+                            'name': tool,
+                            'version': prog.get('authoringToolVersion', ''),
+                            'coordinate_mode': '',
+                            '_source': 'audioProgramme属性'
+                        }
+                        if not self.authoring_info:
+                            self.authoring_info = {'reference_layouts': [], 'renderers': []}
+                        self.authoring_info['renderers'].append(renderer_data)
+                        self.renderer_info = renderer_data
+                        print(f"[ADM解析] 从audioProgramme属性找到渲染器: {tool}")
+                        break
+            
+            # === 新增：从内容推断（Dolby Atmos特征）===
+            if not self.renderer_info:
+                # 特征1：节目名含 Atmos / Dolby
+                inferred_name = None
+                for prog in self.programmes:
+                    prog_name = (prog.get('name', '') or '').lower()
+                    if 'atmos' in prog_name or 'dolby' in prog_name:
+                        inferred_name = 'Dolby Atmos Renderer'
+                        break
+                
+                # 特征2：声道使用 RoomCentric 命名法
+                if not inferred_name:
+                    for ch in self.channel_formats:
+                        if 'roomcentric' in (ch.name or '').lower():
+                            inferred_name = 'Dolby Atmos Renderer (Room-Centric)'
+                            break
+                
+                if inferred_name:
+                    renderer_data = {
+                        'uri': 'urn:dolby:atmos',
+                        'name': inferred_name,
+                        'version': '',
+                        'coordinate_mode': 'room-centric',
+                        '_inferred': True,
+                        '_source': '内容推断（节目名/声道特征）'
+                    }
+                    if not self.authoring_info:
+                        self.authoring_info = {'reference_layouts': [], 'renderers': []}
+                    self.authoring_info['renderers'].append(renderer_data)
+                    self.renderer_info = renderer_data
+                    print(f"[ADM解析] 从内容推断渲染器: {inferred_name}")
+            
+            # 解析 audioChannelFormat
+            channel_formats = self._findall(root, './/adm:audioChannelFormat')
+            print(f"[ADM解析] 找到 {len(channel_formats)} 个 audioChannelFormat")
+            for ch_fmt in channel_formats:
+                ch_id = ch_fmt.get('audioChannelFormatID', '')
+                ch_name = ch_fmt.get('audioChannelFormatName', '')
+                
+                ch_type = ch_fmt.get('typeDefinition', '') or ch_fmt.get('typeLabel', 'DirectSpeakers')
+                # 如果 typeLabel 是数字代码，映射为类型名称
+                TYPE_LABEL_MAP = {
+                    '0001': 'DirectSpeakers',
+                    '0002': 'Matrix',
+                    '0003': 'Objects',
+                    '0004': 'HOA',
+                    '0005': 'Binaural',
+                }
+                if ch_type in TYPE_LABEL_MAP:
+                    ch_type = TYPE_LABEL_MAP[ch_type]
+                
+                position = None
+                speaker_label = None
+                
+                speaker = self._find(ch_fmt, './/adm:speakerLabel')
+                if speaker is not None and speaker.text:
+                    speaker_label = speaker.text
+                else:
+                    speaker = self._find(ch_fmt, 'adm:speakerLabel')
+                    if speaker is not None and speaker.text:
+                        speaker_label = speaker.text
+                
+                pos_blocks = self._findall(ch_fmt, './/adm:audioBlockFormat')
+                if pos_blocks:
+                    pos_block = pos_blocks[0]
+                    position = {
+                        'azimuth': float(pos_block.get('azimuth', 0) or 0),
+                        'elevation': float(pos_block.get('elevation', 0) or 0),
+                        'distance': float(pos_block.get('distance', 1.0) or 1.0)
+                    }
+                    # 支持笛卡尔坐标子元素格式 <position coordinate="X/Y/Z">
+                    cartesian_positions = {}
+                    for pos_el in self._findall(pos_block, 'adm:position'):
+                        coord = pos_el.get('coordinate', '')
+                        if coord and pos_el.text:
+                            try:
+                                cartesian_positions[coord.upper()] = float(pos_el.text)
+                            except ValueError:
+                                pass
+                    if cartesian_positions:
+                        position['cartesian'] = cartesian_positions
+                        # 检测 cartesian 标志
+                        cart_el = self._find(pos_block, 'adm:cartesian')
+                        if cart_el is not None and cart_el.text:
+                            position['is_cartesian'] = cart_el.text.strip() in ('1', 'true', 'True')
+                    # 支持 <speakerLabel> 在 audioBlockFormat 内（RoomCentric 风格）
+                    spk_in_block = self._find(pos_block, 'adm:speakerLabel')
+                    if spk_in_block is not None and spk_in_block.text:
+                        speaker_label = spk_in_block.text
+                
+                is_lfe = False
+                if speaker_label and 'LFE' in speaker_label.upper():
+                    is_lfe = True
+                elif ch_name and 'LFE' in ch_name.upper():
+                    is_lfe = True
+                elif ch_id and 'LFE' in ch_id.upper():
+                    is_lfe = True
+                
+                self.channel_formats.append(ADMChannel(
+                    id=ch_id,
+                    name=ch_name,
+                    type=ch_type,
+                    position=position,
+                    speaker_label=speaker_label,
+                    is_lfe=is_lfe
+                ))
+            
+            if self.chna_data:
+                self._parse_chna()
+            
+            print(f"[ADM解析] 完成: {len(self.programmes)} programmes, {len(self.contents)} contents, "
+                  f"{len(self.objects)} objects, {len(self.channel_formats)} channels")
+            
+        except Exception as e:
+            print(f"[ADM解析错误] {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _parse_chna(self):
+        """解析 chna chunk"""
+        if not self.chna_data or len(self.chna_data) < 4:
+            return
+        
+        num_tracks = struct.unpack('<H', self.chna_data[0:2])[0]
+        
+        offset = 4
+        for i in range(min(num_tracks, 100)):
+            if offset + 12 > len(self.chna_data):
+                break
+            
+            track_id = struct.unpack('<H', self.chna_data[offset:offset+2])[0]
+            
+            try:
+                uid_bytes = self.chna_data[offset+2:offset+14]
+                uid = uid_bytes.decode('ascii', errors='ignore').strip('\x00')
+            except:
+                uid = f"track_{i}"
+            
+            self.track_mappings.append(ADMTrack(
+                index=i,
+                uid=uid,
+                format_id='',
+                pack_id=''
+            ))
+            offset += 12
+    
+    def get_channel_config(self) -> List[ADMChannel]:
+        """获取声床配置"""
+        if self.channel_formats:
+            return [ch for ch in self.channel_formats if ch.type == 'DirectSpeakers']
+        return []
+    
+    def detect_configuration(self) -> Tuple[str, float, str]:
+        """
+        自动识别声床配置
+        返回: (配置名称, 置信度, 描述)
+        """
+        direct_speakers = self.get_channel_config()
+        if not direct_speakers:
+            return 'unknown', 0.0, '未找到声床'
+        
+        return detect_config_by_features(direct_speakers)
+    
+    def to_itu1770_config(self):
+        """转换为 ITU1770Meter 的 ChannelConfig"""
+        from itu1770_meter import ChannelConfig
+        
+        adm_channels = self.get_channel_config()
+        result = []
+        
+        print(f"[ADM转换] 转换 {len(adm_channels)} 个DirectSpeakers声道")
+        
+        for ch in adm_channels:
+            azimuth = 0
+            elevation = 0
+            
+            # 优先使用speaker_label映射（即使position存在但为0）
+            if ch.speaker_label:
+                az, el = self._speaker_label_to_angles(ch.speaker_label)
+                if az != 0 or el != 0:
+                    azimuth, elevation = az, el
+                elif ch.position and (ch.position.get('azimuth', 0) != 0 or ch.position.get('elevation', 0) != 0):
+                    azimuth = ch.position.get('azimuth', 0)
+                    elevation = ch.position.get('elevation', 0)
+            elif ch.position:
+                azimuth = ch.position.get('azimuth', 0)
+                elevation = ch.position.get('elevation', 0)
+            
+            print(f"  {ch.name}: az={azimuth}, el={elevation}, LFE={ch.is_lfe}")
+            
+            result.append(ChannelConfig(
+                name=ch.name or ch.id,
+                azimuth=azimuth,
+                elevation=elevation,
+                is_lfe=ch.is_lfe
+            ))
+        
+        return result
+    
+    def get_renderer_summary(self) -> str:
+        """获取渲染器信息摘要"""
+        if not self.renderer_info:
+            return "未检测到渲染器信息"
+        
+        parts = []
+        info = self.renderer_info
+        if info.get('name'):
+            parts.append(f"名称: {info['name']}")
+        if info.get('version'):
+            parts.append(f"版本: {info['version']}")
+        if info.get('uri'):
+            parts.append(f"URI: {info['uri']}")
+        if info.get('coordinate_mode'):
+            parts.append(f"坐标模式: {info['coordinate_mode']}")
+        if info.get('_inferred'):
+            parts.append("(基于内容推断)")
+        elif info.get('_source'):
+            parts.append(f"({info['_source']})")
+        
+        return " | ".join(parts) if parts else "渲染器信息不完整"
+    
+    def get_authoring_summary(self) -> str:
+        """获取创作软件信息摘要"""
+        if not self.authoring_info:
+            return "未检测到创作软件信息"
+        
+        parts = []
+        info = self.authoring_info
+        if info.get('reference_layouts'):
+            parts.append(f"参考布局: {', '.join(info['reference_layouts'])}")
+        if info.get('renderers'):
+            for r in info['renderers']:
+                name = r.get('name', '未知')
+                if r.get('_inferred'):
+                    parts.append(f"渲染器: {name} (推断)")
+                else:
+                    parts.append(f"渲染器: {name}")
+        
+        return " | ".join(parts) if parts else "创作信息不完整"
+    
+    def _speaker_label_to_angles(self, label: str):
+        """将扬声器标签转换为角度"""
+        if not label:
+            return (0, 0)
+        
+        mapping = {
+            'M+030': (30, 0), 'M-030': (-30, 0),
+            'M+000': (0, 0),
+            'M+110': (110, 0), 'M-110': (-110, 0),
+            'M+090': (90, 0), 'M-090': (-90, 0),
+            'M+135': (135, 0), 'M-135': (-135, 0),
+            'M+045': (45, 0), 'M-045': (-45, 0),
+            'U+030': (30, 45), 'U-030': (-30, 45),
+            'U+110': (110, 45), 'U-110': (-110, 45),
+            'U+090': (90, 45), 'U-090': (-90, 45),
+            'U+135': (135, 45), 'U-135': (-135, 45),
+            'U+045': (45, 45), 'U-045': (-45, 45),
+            'U+180': (180, 45),
+            'U+000': (0, 45),
+            'T+000': (0, 90),
+            'B+000': (0, -30),
+            'LFE1': (0, 0), 'LFE2': (0, 0),
+            'L': (30, 0), 'R': (-30, 0),
+            'C': (0, 0), 'Centre': (0, 0), 'Center': (0, 0),
+            'LFE': (0, 0),
+            'Ls': (110, 0), 'Rs': (-110, 0),
+            'Lss': (90, 0), 'Rss': (-90, 0),
+            'Lrs': (135, 0), 'Rrs': (-135, 0),
+            'Ltf': (45, 45), 'Rtf': (-45, 45),
+            'Ltb': (135, 45), 'Rtb': (-135, 45),
+            'Ltr': (135, 45), 'Rtr': (-135, 45),
+        }
+        return mapping.get(label, (0, 0))
+
+
+class BW64Parser:
+    """BW64 文件解析器 (ITU-R BS.2088)"""
+    
+    CHUNK_ID_AXML = b'axml'
+    CHUNK_ID_CHNA = b'chna'
+    
+    def __init__(self, file_path: str):
+        self.file_path = Path(file_path)
+        self.axml_data: Optional[bytes] = None
+        self.chna_data: Optional[bytes] = None
+        self.audio_info: Optional[Dict] = None
+        self.adm: Optional[ADM] = None
+        self.audio_offset: int = 0
+        self.audio_size: int = 0
+    
+    def parse(self) -> ADM:
+        """解析 BW64 文件"""
+        with open(self.file_path, 'rb') as f:
+            riff_id = f.read(4)
+            if riff_id not in (b'RIFF', b'BW64'):
+                raise ValueError(f"不是有效的 RIFF/BW64 文件: {riff_id}")
+            
+            file_size = struct.unpack('<I', f.read(4))[0]
+            wave_id = f.read(4)
+            
+            if wave_id not in (b'WAVE', b'BW64'):
+                raise ValueError(f"不是有效的 WAVE/BW64 格式: {wave_id}")
+            
+            while f.tell() < 8 + file_size:
+                chunk_id = f.read(4)
+                if len(chunk_id) < 4:
+                    break
+                
+                try:
+                    chunk_size = struct.unpack('<I', f.read(4))[0]
+                except:
+                    break
+                
+                if chunk_id == self.CHUNK_ID_AXML:
+                    self.axml_data = f.read(chunk_size)
+                    if chunk_size % 2:
+                        f.read(1)
+                
+                elif chunk_id == self.CHUNK_ID_CHNA:
+                    self.chna_data = f.read(chunk_size)
+                    if chunk_size % 2:
+                        f.read(1)
+                
+                elif chunk_id == b'fmt ':
+                    fmt_data = f.read(chunk_size)
+                    self.audio_info = self._parse_fmt_chunk(fmt_data)
+                    if chunk_size % 2:
+                        f.read(1)
+                
+                elif chunk_id == b'data':
+                    self.audio_offset = f.tell()
+                    self.audio_size = chunk_size
+                    f.seek(chunk_size, 1)
+                    if chunk_size % 2:
+                        f.read(1)
+                else:
+                    f.seek(chunk_size, 1)
+                    if chunk_size % 2:
+                        f.read(1)
+        
+        if self.axml_data:
+            self.adm = ADM(self.axml_data, self.chna_data)
+            self.adm.parse()
+        
+        return self.adm
+    
+    def _parse_fmt_chunk(self, data: bytes) -> Dict:
+        """解析 fmt chunk"""
+        if len(data) < 16:
+            return {}
+        
+        audio_format = struct.unpack('<H', data[0:2])[0]
+        num_channels = struct.unpack('<H', data[2:4])[0]
+        sample_rate = struct.unpack('<I', data[4:8])[0]
+        bits_per_sample = struct.unpack('<H', data[14:16])[0] if len(data) > 14 else 16
+        
+        return {
+            'format': audio_format,
+            'channels': num_channels,
+            'sample_rate': sample_rate,
+            'bits': bits_per_sample
+        }
+    
+    def read_audio(self):
+        """读取音频数据"""
+        import soundfile as sf
+        data, sr = sf.read(str(self.file_path), dtype='float32')
+        return data, sr
+
+
+def is_adm_file(file_path: str) -> bool:
+    """检查文件是否为 ADM/BW64 格式"""
+    path = Path(file_path)
+    
+    if path.suffix.lower() in ['.bw64', '.bwf', '.adm']:
+        return True
+    
+    try:
+        with open(path, 'rb') as f:
+            header = f.read(12)
+            if header[:4] == b'BW64':
+                return True
+            
+            if header[:4] == b'RIFF' and header[8:12] == b'WAVE':
+                f.seek(12)
+                while True:
+                    chunk_id = f.read(4)
+                    if len(chunk_id) < 4:
+                        break
+                    if chunk_id == b'axml':
+                        return True
+                    try:
+                        chunk_size = struct.unpack('<I', f.read(4))[0]
+                        f.seek(chunk_size + (chunk_size % 2), 1)
+                    except:
+                        break
+    except:
+        pass
+    
+    return False
+"""
+ITU-R BS.1770-5 响度测量核心算法（严格遵循标准重写版）
+
+算法依据：
+- ITU-R BS.1770-5 (2023) — 集成响度、真峰值、声道加权
+- EBU Tech 3341 (2016) — Momentary / Short-term 定义
+- EBU Tech 3342 (2016) — 响度范围 LRA
+
+关键标准要点：
+1. K-加权滤波：整段连续应用两段级联 IIR（Stage1 高通 + Stage2 高频 shelf），
+   仅使用 48kHz 标准系数（Table 1/2）。非 48kHz 输入先重采样。
+2. 集成响度：
+   - 400ms 不重叠 gating blocks（48kHz 下每块 19200 采样）。
+   - 每块加权功率 z_i = Σ G_j · mean_sq_j。
+   - 块响度 l_i = -0.691 + 10·log10(z_i)。
+   - 绝对门限：-70.0 LKFS（功率域等效门限 10^(-6.9309)）。
+   - 相对门限：通过绝对门限的块的平均功率 × 0.1（即平均响度 -10 LU 的功率等效）。
+   - 集成响度 = 通过双门限的所有块的平均 z 转 dB（公式 2）。
+3. 真峰值：原始音频整段 4x 过采样 FIR（48 阶 4 相，Annex 2），避免分块边界失真。
+4. Momentary：400ms 滑动窗口，100ms 步进（EBU Tech 3341）。
+5. Short-term：3s 滑动窗口，100ms 步进（EBU Tech 3341）。
+6. LRA：基于 Short-term 序列，双门限后取 10%~95% 分位差（EBU Tech 3342）。
+
+进度回调：
+    progress_callback(step_name: str, overall_progress_pct: float)
+    step_name: 当前计算步骤（中文）
+    overall_progress_pct: 0.0 ~ 100.0，反映整个测量流程的进度
+"""
+
+import numpy as np
+from scipy import signal
+from dataclasses import dataclass
+from typing import List, Optional, Callable
+
+
+@dataclass
+class ChannelConfig:
+    """声道配置"""
+    name: str
+    azimuth: float
+    elevation: float
+    is_lfe: bool = False
+
+    def get_weight(self) -> float:
+        """ITU-R BS.1770-5 Table 4 权重"""
+        if self.is_lfe:
+            return 0.0
+        abs_az = abs(self.azimuth)
+        abs_el = abs(self.elevation)
+        # 顶部声道（仰角 ≥ 30°）
+        if abs_el >= 30.0:
+            return 1.0
+        # 前方 / 后方（仰角 < 30°）
+        if abs_az < 60.0:
+            return 1.0
+        elif abs_az <= 120.0:
+            return 1.41  # +1.5 dB，线性值
+        else:
+            return 1.0
+
+
+class ITU1770Meter:
+    """ITU-R BS.1770-5 响度计"""
+
+    # 48kHz K-加权滤波器系数（Table 1 / Table 2）
+    STAGE1_B = [1.53512485958697, -2.69169618940638, 1.19839281085285]
+    STAGE1_A = [1.0, -1.69065929318241, 0.73248077421585]
+    STAGE2_B = [1.0, -2.0, 1.0]
+    STAGE2_A = [1.0, -1.99004745483398, 0.99007225036621]
+
+    # 真峰值 FIR 系数（Annex 2，48 阶 4 相）
+    TP_FIR = np.array([
+        0.0017089843750, -0.0291748046875, -0.0189208984375, -0.0083007812500,
+        0.0109863281250, 0.0292968750000, 0.0330810546875, 0.0148925781250,
+        -0.0196533203125, -0.0517578125000, -0.0582275390625, -0.0266113281250,
+        0.0332031250000, 0.0891113281250, 0.1015625000000, 0.0476074218750,
+        -0.0594482421875, -0.1665039062500, -0.2003173828125, -0.1022949218750,
+        0.1373291015625, 0.4650878906250, 0.7797851562500, 0.9721679687500,
+        0.9721679687500, 0.7797851562500, 0.4650878906250, 0.1373291015625,
+        -0.1022949218750, -0.2003173828125, -0.1665039062500, -0.0594482421875,
+        0.0476074218750, 0.1015625000000, 0.0891113281250, 0.0332031250000,
+        -0.0266113281250, -0.0582275390625, -0.0517578125000, -0.0196533203125,
+        0.0148925781250, 0.0330810546875, 0.0292968750000, 0.0109863281250,
+        -0.0083007812500, -0.0189208984375, -0.0291748046875, 0.0017089843750
+    ], dtype=np.float64)
+
+    # 标准声道配置
+    CONFIGS = {
+        'stereo': [
+            ChannelConfig('L', 30, 0), ChannelConfig('R', -30, 0)
+        ],
+        '5.1': [
+            ChannelConfig('L', 30, 0), ChannelConfig('R', -30, 0),
+            ChannelConfig('C', 0, 0), ChannelConfig('LFE', 0, 0, True),
+            ChannelConfig('Ls', 110, 0), ChannelConfig('Rs', -110, 0),
+        ],
+        '7.1': [
+            ChannelConfig('L', 30, 0), ChannelConfig('R', -30, 0),
+            ChannelConfig('C', 0, 0), ChannelConfig('LFE', 0, 0, True),
+            ChannelConfig('Lss', 90, 0), ChannelConfig('Rss', -90, 0),
+            ChannelConfig('Lrs', 135, 0), ChannelConfig('Rrs', -135, 0),
+        ],
+        '5.1.4': [
+            ChannelConfig('L', 30, 0), ChannelConfig('R', -30, 0),
+            ChannelConfig('C', 0, 0), ChannelConfig('LFE', 0, 0, True),
+            ChannelConfig('Ls', 110, 0), ChannelConfig('Rs', -110, 0),
+            ChannelConfig('Ltf', 45, 45), ChannelConfig('Rtf', -45, 45),
+            ChannelConfig('Ltr', 135, 45), ChannelConfig('Rtr', -135, 45),
+        ],
+        '7.1.2': [
+            ChannelConfig('L', 30, 0), ChannelConfig('R', -30, 0),
+            ChannelConfig('C', 0, 0), ChannelConfig('LFE', 0, 0, True),
+            ChannelConfig('Lss', 90, 0), ChannelConfig('Rss', -90, 0),
+            ChannelConfig('Lrs', 135, 0), ChannelConfig('Rrs', -135, 0),
+            ChannelConfig('Ltf', 45, 45), ChannelConfig('Rtf', -45, 45),
+        ],
+        '7.1.4': [
+            ChannelConfig('L', 30, 0), ChannelConfig('R', -30, 0),
+            ChannelConfig('C', 0, 0), ChannelConfig('LFE', 0, 0, True),
+            ChannelConfig('Lss', 90, 0), ChannelConfig('Rss', -90, 0),
+            ChannelConfig('Lrs', 135, 0), ChannelConfig('Rrs', -135, 0),
+            ChannelConfig('Ltf', 45, 45), ChannelConfig('Rtf', -45, 45),
+            ChannelConfig('Ltb', 135, 45), ChannelConfig('Rtb', -135, 45),
+        ],
+    }
+
+    def __init__(self, channel_config: List[ChannelConfig], sample_rate: int = 48000):
+        self.channel_config = channel_config
+        self.sample_rate = sample_rate
+        self.weights = [ch.get_weight() for ch in channel_config]
+
+    @classmethod
+    def auto_config(cls, num_channels: int) -> List[ChannelConfig]:
+        """根据声道数自动选择配置"""
+        mapping = {2: 'stereo', 6: '5.1', 8: '7.1', 10: '5.1.4', 12: '7.1.4'}
+        config_name = mapping.get(num_channels, 'stereo')
+        return cls.CONFIGS.get(config_name, cls.CONFIGS['stereo'])
+
+    # ------------------------------------------------------------------ #
+    # 内部工具方法
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _cb(callback: Optional[Callable], step: str, pct: float):
+        """安全调用进度回调"""
+        if callback is not None:
+            callback(step, float(pct))
+
+    def _resample_to_48k(self, audio: np.ndarray, sr: int,
+                         callback: Optional[Callable] = None) -> np.ndarray:
+        """重采样到 48kHz，分块处理以支持进度报告"""
+        if sr == 48000:
+            return audio
+
+        target_sr = 48000
+        g = int(np.gcd(sr, target_sr))
+        up = target_sr // g
+        down = sr // g
+
+        # 每块处理约 1 秒原始音频，避免内存暴涨
+        chunk_samples = sr
+        num_chunks = max(1, (len(audio) + chunk_samples - 1) // chunk_samples)
+        resampled_chunks = []
+
+        for i in range(num_chunks):
+            start = i * chunk_samples
+            end = min(start + chunk_samples, len(audio))
+            chunk = audio[start:end]
+            resampled = signal.resample_poly(chunk, up, down, axis=0)
+            resampled_chunks.append(resampled)
+
+            pct = (i + 1) / num_chunks * 15.0
+            self._cb(callback, "重采样到 48kHz", pct)
+
+        return np.concatenate(resampled_chunks, axis=0)
+
+    def _k_weight(self, audio: np.ndarray) -> np.ndarray:
+        """K-加权滤波（整段连续，避免分块状态重置）"""
+        y1 = signal.lfilter(self.STAGE1_B, self.STAGE1_A, audio, axis=0)
+        y2 = signal.lfilter(self.STAGE2_B, self.STAGE2_A, y1, axis=0)
+        return y2
+
+    def _true_peak(self, audio: np.ndarray,
+                   callback: Optional[Callable] = None) -> float:
+        """真峰值测量（整段原始音频，4x 过采样 FIR）"""
+        max_tp = 0.0
+        num_ch = audio.shape[1]
+        for ch in range(num_ch):
+            x = audio[:, ch].astype(np.float64)
+            x_up = np.zeros(len(x) * 4, dtype=np.float64)
+            x_up[::4] = x
+            y = signal.lfilter(self.TP_FIR, [1.0], x_up)
+            tp = np.max(np.abs(y))
+            if tp > max_tp:
+                max_tp = tp
+            pct = 20.0 + (ch + 1) / num_ch * 5.0
+            self._cb(callback, "计算真峰值", pct)
+        if max_tp > 0.0:
+            return 20.0 * np.log10(max_tp)
+        return -np.inf
+
+    def _weighted_power(self, block: np.ndarray) -> float:
+        """
+        计算单一块的加权功率 z = Σ G_j · mean_sq_j
+        block: (samples, channels)
+        """
+        weighted_sum = 0.0
+        for j, ch_cfg in enumerate(self.channel_config):
+            if ch_cfg.is_lfe or j >= block.shape[1]:
+                continue
+            w = self.weights[j]
+            if w > 0.0:
+                # 使用 float64 避免精度问题
+                mean_sq = np.mean(block[:, j].astype(np.float64) ** 2)
+                weighted_sum += w * mean_sq
+        return weighted_sum
+
+    def _integrated_loudness(self, filtered: np.ndarray,
+                             callback: Optional[Callable] = None):
+        """
+        集成响度（ITU-R BS.1770-5 公式 1 / 2）
+        返回: (integrated_lufs, blocks_loudness_list)
+        """
+        sr = 48000
+        block_samples = int(0.4 * sr)          # 400ms = 19200 samples
+        num_samples = len(filtered)
+        num_blocks = num_samples // block_samples
+
+        if num_blocks == 0:
+            return -np.inf, []
+
+        z_values = []          # 每块的加权功率（线性）
+        blocks_loudness = []   # 每块的响度 l_i（LKFS），用于 GUI 曲线
+
+        report_interval = max(1, num_blocks // 20)
+
+        for i in range(num_blocks):
+            start = i * block_samples
+            end = start + block_samples
+            block = filtered[start:end]
+
+            z = self._weighted_power(block)
+            z_values.append(z)
+
+            if z > 0.0:
+                l = -0.691 + 10.0 * np.log10(z)
+            else:
+                l = -np.inf
+            blocks_loudness.append(l)
+
+            if callback and (i + 1) % report_interval == 0:
+                pct = 25.0 + (i + 1) / num_blocks * 25.0  # 集成响度占 25~50%
+                self._cb(callback, "计算集成响度", pct)
+
+        z_arr = np.array(z_values, dtype=np.float64)
+
+        # Step 2: 绝对门限 -70.0 LKFS（转成功率域比较，避免数值抖动）
+        abs_threshold_power = 10.0 ** ((-70.0 + 0.691) / 10.0)
+        abs_mask = z_arr > abs_threshold_power
+
+        if not np.any(abs_mask):
+            return -np.inf, blocks_loudness
+
+        # Step 3: 相对门限 = 通过绝对门限的块的平均响度 - 10 LU
+        # 功率域等效：mean(z_abs) / 10.0
+        mean_z_abs = np.mean(z_arr[abs_mask])
+        rel_threshold_power = mean_z_abs / 10.0
+
+        # Step 4: 双门限筛选
+        final_mask = z_arr > rel_threshold_power
+        if not np.any(final_mask):
+            return -np.inf, blocks_loudness
+
+        # Step 5: 集成响度 = 通过双门限的块的平均 z 转 dB
+        mean_z_final = np.mean(z_arr[final_mask])
+        integrated = -0.691 + 10.0 * np.log10(mean_z_final)
+
+        return float(integrated), blocks_loudness
+
+    def _momentary_short_term(self, filtered: np.ndarray,
+                              callback: Optional[Callable] = None):
+        """
+        Momentary / Short-term（EBU Tech 3341 / EBU Tech 3342）
+        返回: (current_momentary, current_short_term,
+               max_momentary, max_short_term,
+               short_term_values_100ms, short_term_values_1s)
+        short_term_values_100ms: 100ms 步进，用于实时显示 / max_short_term
+        short_term_values_1s:    1s 步进，用于 LRA（EBU Tech 3342 §3.1）
+        """
+        sr = 48000
+        win_100ms = int(0.1 * sr)   # 4800 samples
+        num_samples = len(filtered)
+
+        # 计算所有 100ms 窗口的加权功率（步进 100ms，无重叠）
+        num_100ms = max(0, (num_samples - win_100ms) // win_100ms + 1)
+        weighted_powers = []
+
+        report_interval = max(1, num_100ms // 10)
+
+        for i in range(num_100ms):
+            start = i * win_100ms
+            end = start + win_100ms
+            block = filtered[start:end]
+            z = self._weighted_power(block)
+            weighted_powers.append(z)
+
+            if callback and (i + 1) % report_interval == 0:
+                pct = 50.0 + (i + 1) / num_100ms * 30.0  # 占 50~80%
+                self._cb(callback, "计算短时/瞬时响度", pct)
+
+        if not weighted_powers:
+            return -np.inf, -np.inf, -np.inf, -np.inf, [], []
+
+        # Momentary: 400ms 滑动窗口 = 4 个 100ms
+        m_win = 4
+        momentary_values = []
+        for i in range(len(weighted_powers)):
+            start = max(0, i - m_win + 1)
+            window = weighted_powers[start:i + 1]
+            if len(window) < m_win:
+                continue  # 窗口未满，按标准不输出
+            mean_z = np.mean(window)
+            if mean_z > 0.0:
+                m = -0.691 + 10.0 * np.log10(mean_z)
+            else:
+                m = -np.inf
+            momentary_values.append(m)
+
+        # Short-term (EBU Tech 3341): 3s 滑动窗口，100ms 步进
+        # 用于实时显示和 max_short_term
+        s_win = 30
+        short_term_values_100ms = []
+        for i in range(len(weighted_powers)):
+            start = max(0, i - s_win + 1)
+            window = weighted_powers[start:i + 1]
+            if len(window) < s_win:
+                continue
+            mean_z = np.mean(window)
+            if mean_z > 0.0:
+                s = -0.691 + 10.0 * np.log10(mean_z)
+            else:
+                s = -np.inf
+            short_term_values_100ms.append(s)
+
+        # Short-term (EBU Tech 3342): 3s 窗口，1s 步进
+        # LRA 必须使用 1s 步进，否则窗口高度重叠导致动态范围被平滑
+        short_term_values_1s = []
+        step = 10  # 1 秒 = 10 个 100ms
+        for i in range(0, len(weighted_powers) - s_win + 1, step):
+            window = weighted_powers[i:i + s_win]
+            mean_z = np.mean(window)
+            if mean_z > 0.0:
+                s = -0.691 + 10.0 * np.log10(mean_z)
+            else:
+                s = -np.inf
+            short_term_values_1s.append(s)
+
+        max_momentary = max(momentary_values) if momentary_values else -np.inf
+        max_short_term = max(short_term_values_100ms) if short_term_values_100ms else -np.inf
+        current_momentary = momentary_values[-1] if momentary_values else -np.inf
+        current_short_term = short_term_values_100ms[-1] if short_term_values_100ms else -np.inf
+
+        return (current_momentary, current_short_term,
+                max_momentary, max_short_term,
+                short_term_values_100ms, short_term_values_1s)
+
+    @staticmethod
+    def _lra(short_term_values: List[float]) -> float:
+        """响度范围 LRA（EBU Tech 3342）"""
+        if not short_term_values:
+            return 0.0
+
+        st_arr = np.array(short_term_values, dtype=np.float64)
+
+        # 第一门限：-70.0 LKFS
+        valid = st_arr[st_arr > -70.0]
+        if len(valid) < 2:
+            return 0.0
+
+        # 第二门限：平均值 - 20 LU
+        avg = np.mean(valid)
+        second_gate = avg - 20.0
+
+        gated = valid[valid > second_gate]
+        if len(gated) < 2:
+            return 0.0
+
+        p10 = np.percentile(gated, 10.0)
+        p95 = np.percentile(gated, 95.0)
+
+        return float(max(0.0, p95 - p10))
+
+    # ------------------------------------------------------------------ #
+    # 公共接口
+    # ------------------------------------------------------------------ #
+
+    def process_audio(self, audio: np.ndarray, sr: Optional[int] = None,
+                      progress_callback: Optional[Callable] = None) -> dict:
+        """
+        处理完整音频并返回测量结果。
+
+        Args:
+            audio: 音频数据，shape 为 (samples,) 或 (samples, channels)
+            sr: 原始采样率。若非 48000，会先重采样到 48000。
+            progress_callback: 进度回调，签名为 (step_name, overall_progress_pct)
+                               step_name 为当前步骤描述（中文）
+                               overall_progress_pct 为 0.0~100.0 的浮点数
+
+        Returns:
+            dict，包含以下字段（与 main_gui.py 兼容）：
+                integrated: float      # 集成响度 LKFS
+                short_term: float      # 当前/最后短时响度 LKFS
+                momentary: float       # 当前/最后瞬时响度 LKFS
+                true_peak: float       # 最大真峰值 dBTP
+                lra: float             # 响度范围 LU
+                max_short_term: float  # 最大短时响度
+                max_momentary: float   # 最大瞬时响度
+                blocks: List[float]    # 400ms 块响度序列（LKFS）
+        """
+        # 标准化输入维度
+        if audio.ndim == 1:
+            audio = audio.reshape(-1, 1)
+        audio = np.asarray(audio, dtype=np.float64)
+
+        actual_sr = sr if sr is not None else self.sample_rate
+
+        # ---- 阶段 1: 重采样到 48kHz ----
+        if actual_sr != 48000:
+            self._cb(progress_callback, "重采样到 48kHz", 0.0)
+            audio = self._resample_to_48k(audio, actual_sr, progress_callback)
+
+        # ---- 阶段 2: K-加权滤波 ----
+        self._cb(progress_callback, "K-加权滤波", 15.0)
+        filtered = self._k_weight(audio)
+        self._cb(progress_callback, "K-加权滤波", 20.0)
+
+        # ---- 阶段 3: 真峰值 ----
+        self._cb(progress_callback, "计算真峰值", 20.0)
+        true_peak_db = self._true_peak(audio, progress_callback)
+
+        # ---- 阶段 4: 集成响度 ----
+        self._cb(progress_callback, "计算集成响度", 25.0)
+        integrated, blocks_loudness = self._integrated_loudness(
+            filtered, progress_callback
+        )
+
+        # ---- 阶段 5: Momentary / Short-term ----
+        self._cb(progress_callback, "计算短时/瞬时响度", 50.0)
+        (current_momentary, current_short_term,
+         max_momentary, max_short_term,
+         short_term_values_100ms, short_term_values_1s) = \
+            self._momentary_short_term(filtered, progress_callback)
+
+        # ---- 阶段 6: LRA ----
+        self._cb(progress_callback, "计算响度范围", 80.0)
+        lra = self._lra(short_term_values_1s)
+        self._cb(progress_callback, "计算响度范围", 90.0)
+
+        # ---- 收尾 ----
+        self._cb(progress_callback, "整理结果", 95.0)
+        result = {
+            'integrated': integrated,
+            'short_term': current_short_term,
+            'momentary': current_momentary,
+            'true_peak': true_peak_db,
+            'lra': lra,
+            'max_short_term': max_short_term,
+            'max_momentary': max_momentary,
+            'blocks': blocks_loudness,
+            'short_term_curve': short_term_values_1s,
+        }
+        self._cb(progress_callback, "测量完成", 100.0)
+        return result
+"""
+LRA 诊断脚本
+加载指定音频，输出 ITU1770Meter 的 LRA 计算中间值，与 FFmpeg(libebur128) 对比
+"""
+import sys
+import numpy as np
+import soundfile as sf
+from itu1770_meter import ITU1770Meter
+
+
+def analyze_lra(file_path: str):
+    print(f"文件: {file_path}")
+    info = sf.info(file_path)
+    print(f"采样率: {info.samplerate} Hz, 声道: {info.channels}, 时长: {info.duration:.2f}s")
+
+    audio, sr = sf.read(file_path, dtype='float64')
+    if audio.ndim == 1:
+        audio = audio.reshape(-1, 1)
+
+    config = ITU1770Meter.auto_config(audio.shape[1])
+    meter = ITU1770Meter(config, sr)
+
+    # 手动执行各阶段以获取中间值
+    if sr != 48000:
+        audio = meter._resample_to_48k(audio, sr)
+    filtered = meter._k_weight(audio)
+    true_peak = meter._true_peak(audio)
+    integrated, blocks = meter._integrated_loudness(filtered)
+    (cur_m, cur_s, max_m, max_s, st_100ms, st_1s) = meter._momentary_short_term(filtered)
+    lra = meter._lra(st_1s)
+
+    print(f"\n=== 核心结果 ===")
+    print(f"Integrated: {integrated:.3f} LKFS")
+    print(f"True Peak:  {true_peak:.3f} dBTP")
+    print(f"Max Momentary: {max_m:.3f} LKFS")
+    print(f"Max Short-term: {max_s:.3f} LKFS")
+    print(f"LRA: {lra:.3f} LU")
+
+    print(f"\n=== 1s 步进 Short-term 序列 ({len(st_1s)} 个值) ===")
+    st_arr = np.array(st_1s, dtype=np.float64)
+    print(f"Min: {np.min(st_arr):.3f}, Max: {np.max(st_arr):.3f}")
+    print(f"Mean: {np.mean(st_arr):.3f}, Median: {np.median(st_arr):.3f}")
+    print(f"Std: {np.std(st_arr):.3f}")
+
+    print(f"\n=== LRA 门限分析 ===")
+    # 绝对门限
+    valid = st_arr[st_arr > -70.0]
+    print(f"通过绝对门限(-70): {len(valid)}/{len(st_arr)} 个")
+    print(f"  被过滤掉的最小值: {np.min(st_arr[st_arr <= -70.0]):.3f}" if np.any(st_arr <= -70.0) else "  无值被绝对门限过滤")
+
+    # 相对门限
+    avg = np.mean(valid)
+    rel_gate = avg - 20.0
+    gated = valid[valid > rel_gate]
+    print(f"通过绝对门限后的平均值: {avg:.3f}")
+    print(f"相对门限(avg - 20): {rel_gate:.3f}")
+    print(f"通过双门限: {len(gated)}/{len(valid)} 个")
+    if len(gated) > 0:
+        print(f"  Gated Min: {np.min(gated):.3f}, Gated Max: {np.max(gated):.3f}")
+        print(f"  P10: {np.percentile(gated, 10.0):.3f}")
+        print(f"  P95: {np.percentile(gated, 95.0):.3f}")
+        print(f"  P95 - P10 = {np.percentile(gated, 95.0) - np.percentile(gated, 10.0):.3f}")
+
+    # 对比：如果不用门限
+    print(f"\n=== 无门限参考 ===")
+    print(f"P10 (all): {np.percentile(st_arr, 10.0):.3f}")
+    print(f"P95 (all): {np.percentile(st_arr, 95.0):.3f}")
+    print(f"P95-P10 (all): {np.percentile(st_arr, 95.0) - np.percentile(st_arr, 10.0):.3f}")
+
+    # 对比：如果只用绝对门限
+    print(f"\n=== 仅绝对门限参考 ===")
+    print(f"P10 (abs-gated): {np.percentile(valid, 10.0):.3f}")
+    print(f"P95 (abs-gated): {np.percentile(valid, 95.0):.3f}")
+    print(f"P95-P10 (abs-gated): {np.percentile(valid, 95.0) - np.percentile(valid, 10.0):.3f}")
+
+    # 对比：不同相对门限
+    for offset in [15, 18, 20, 22]:
+        g = valid[valid > (avg - offset)]
+        if len(g) >= 2:
+            print(f"\n=== 相对门限 avg - {offset} LU ({len(g)} 个) ===")
+            print(f"  P10: {np.percentile(g, 10.0):.3f}, P95: {np.percentile(g, 95.0):.3f}")
+            print(f"  LRA: {np.percentile(g, 95.0) - np.percentile(g, 10.0):.3f}")
+
+    # 输出前20个和后20个 short-term 值
+    print(f"\n=== Short-term 值序列 (前20) ===")
+    for i, v in enumerate(st_1s[:20]):
+        print(f"  [{i:3d}] {v:+.3f} LKFS")
+    if len(st_1s) > 40:
+        print(f"  ... ({len(st_1s)-40} values omitted) ...")
+    print(f"=== Short-term 值序列 (后20) ===")
+    for i, v in enumerate(st_1s[-20:], start=len(st_1s)-20):
+        print(f"  [{i:3d}] {v:+.3f} LKFS")
+
+
+if __name__ == '__main__':
+    path = r"D:\new workzone\test files for loudness test\贝五-5.1-1M19S-WLM-20.6LKFS-6.7dBTP-8LU.wav"
+    if len(sys.argv) > 1:
+        path = sys.argv[1]
+    analyze_lra(path)
+"""
+ITU-R BS.1770-5 响度测量仪 v3.2 (整合修复版)
+修复：
+- 测量算法（process_audio 变量定义、最大值追踪）
+- 智能声道匹配（支持点号分隔的声道标识）
+- 术语统一（节目响度、最大短时/瞬时响度）
+- ADM解析兼容性（支持旧版adm_parser）
+"""
+
+import sys
+import time
+import re
+from datetime import datetime
+from pathlib import Path
+from dataclasses import dataclass
+from typing import Dict, Optional, List, Tuple
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QLabel, QFileDialog, QProgressBar, QTableWidget,
+    QTableWidgetItem, QGroupBox, QMessageBox, QComboBox, QDialog,
+    QListWidget, QAbstractItemView, QDialogButtonBox, QLineEdit,
+    QFrame, QCheckBox, QSpinBox, QTextEdit, QSizePolicy,
+    QButtonGroup, QScrollArea, QGridLayout, QStyledItemDelegate, QHeaderView
+)
+
+... [中间部分省略] ...
+
+                ws.cell(row=row, column=1).border = thin_border
+                
+                dbtp_cell = ws.cell(row=row, column=2, value=f'{dbtp:+.2f}')
+                dbtp_cell.font = red_font if is_exceed else normal_font
+                dbtp_cell.alignment = center_align
+                dbtp_cell.border = thin_border
+                if is_exceed:
+                    dbtp_cell.fill = exceed_fill
+                
+                ws.cell(row=row, column=3, value=f'≤ {tp_limit:+.1f}').font = normal_font
+                ws.cell(row=row, column=3).alignment = center_align
+                ws.cell(row=row, column=3).border = thin_border
+                
+                status_cell = ws.cell(row=row, column=4, value='超标' if is_exceed else '合格')
+                status_cell.font = red_font if is_exceed else normal_font
+                status_cell.alignment = center_align
+                status_cell.border = thin_border
+                if is_exceed:
+                    status_cell.fill = exceed_fill
+                
+                row += 1
+            
+            row += 1
+        
+        # 调整列宽
+        ws.column_dimensions['A'].width = 20
+        ws.column_dimensions['B'].width = 18
+        ws.column_dimensions['C'].width = 12
+        ws.column_dimensions['D'].width = 18
+        ws.column_dimensions['E'].width = 12
+        
+        wb.save(path)
+        print(f'[Excel导出] 已保存到: {path}')
+
+
+def _get_resource_path(relative_path):
+    """获取 PyInstaller 打包后的资源路径（兼容 onefile / onedir / 开发环境）"""
+    if hasattr(sys, '_MEIPASS'):
+        # onefile 模式：资源在临时解压目录
+        return Path(sys._MEIPASS) / relative_path
+    # onedir 模式或开发环境：优先尝试 EXE 所在目录
+    exe_dir = Path(sys.executable).parent
+    candidate = exe_dir / relative_path
+    if candidate.exists():
+        return candidate
+    # 开发环境回退
+    return Path(__file__).parent.parent / relative_path
+
+
+def _show_splash(app):
+    """显示启动画面，覆盖程序初始化时间"""
+    from PySide6.QtWidgets import QSplashScreen
+    from PySide6.QtGui import QPixmap, QPainter, QFont, QColor, QFontMetrics
+    from PySide6.QtCore import Qt
+
+    # 加载背景图
+    bg_path = _get_resource_path("assets/bg.png")
+    bg_pixmap = QPixmap(str(bg_path))
+    if bg_pixmap.isNull():
+        # 回退：纯色背景
+        bg_pixmap = QPixmap(800, 600)
+        bg_pixmap.fill(QColor("#0f0f23"))
+
+    # Splash 窗口尺寸（只比卡片大一小圈）
+    splash_w, splash_h = 440, 300
+    card_w, card_h = 420, 280
+
+    # 截取背景图左下角 440×300
+    src_x = 0
+    src_y = max(0, bg_pixmap.height() - splash_h)
+    bg_source = bg_pixmap.copy(src_x, src_y, min(splash_w, bg_pixmap.width()), min(splash_h, bg_pixmap.height()))
+
+    pixmap = QPixmap(splash_w, splash_h)
+    painter = QPainter(pixmap)
+    painter.drawPixmap(0, 0, bg_source)
+
+    # 卡片居中
+    card_x = (splash_w - card_w) // 2
+    card_y = (splash_h - card_h) // 2
+
+    # 60% 透明卡片背景
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor(26, 26, 46, 153))
+    painter.drawRoundedRect(card_x, card_y, card_w, card_h, 12, 12)
+
+    # 卡片边框
+    painter.setPen(QColor("#667eea"))
+    painter.setBrush(Qt.NoBrush)
+    painter.drawRoundedRect(card_x, card_y, card_w, card_h, 12, 12)
+
+    # Logo 图片
+    logo_path = str(_get_resource_path("assets/centerlogo.png"))
+    logo = QPixmap(logo_path)
+    if not logo.isNull():
+        # 缩放至适合卡片宽度（最大 300px 宽）
+        logo_w = min(300, logo.width())
+        logo_h = int(logo.height() * (logo_w / logo.width()))
+        logo = logo.scaled(logo_w, logo_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        logo_x = card_x + (card_w - logo_w) // 2
+        logo_y = card_y + 20
+        painter.drawPixmap(logo_x, logo_y, logo)
+    else:
+        # 回退：文字
+        painter.setPen(QColor("#667eea"))
+        painter.setFont(QFont("Segoe UI", 56, QFont.Bold))
+        painter.drawText(card_x + (card_w - 60) // 2, card_y + 100, "LD")
+
+    # 版本号
+    painter.setPen(QColor("#667eea"))
+    painter.setFont(QFont("Segoe UI", 10))
+    fm = QFontMetrics(painter.font())
+    text = "v1.0  (build 260603)"
+    x = card_x + (card_w - fm.horizontalAdvance(text)) // 2
+    painter.drawText(x, card_y + 175, text)
+
+    # © 2026 YOYH All Rights Reserved
+    painter.setPen(QColor("#8899cc"))
+    painter.setFont(QFont("Segoe UI", 9))
+    fm = QFontMetrics(painter.font())
+    text = "\u00a9 2026 YOYH All Rights Reserved"
+    x = card_x + (card_w - fm.horizontalAdvance(text)) // 2
+    painter.drawText(x, card_y + 205, text)
+
+    # Loading...
+    painter.setPen(QColor("#8899cc"))
+    painter.setFont(QFont("Segoe UI", 9))
+    fm = QFontMetrics(painter.font())
+    text = "Loading..."
+    x = card_x + (card_w - fm.horizontalAdvance(text)) // 2
+    painter.drawText(x, card_y + 250, text)
+
+    painter.end()
+
+    splash = QSplashScreen(pixmap, Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
+    splash.show()
+    app.processEvents()
+    return splash
+
+
+def ensure_single_instance(app):
+    """单实例守护：已有实例在运行时激活它并退出当前进程"""
+    from PySide6.QtNetwork import QLocalServer, QLocalSocket
+    from PySide6.QtWidgets import QApplication, QMainWindow
+
+    socket_name = "LouDuck_SingleInstance"
+
+    # 尝试连接已有实例
+    socket = QLocalSocket()
+    socket.connectToServer(socket_name)
+    if socket.waitForConnected(500):
+        socket.write(b"activate")
+        socket.flush()
+        socket.waitForBytesWritten(500)
+        socket.disconnectFromServer()
+        return False
+
+    # 无已有实例，创建本地服务器
+    server = QLocalServer()
+    server.removeServer(socket_name)
+    if not server.listen(socket_name):
+        return False
+
+    # 防止被垃圾回收
+    app._single_instance_server = server
+
+    def on_new_connection():
+        conn = server.nextPendingConnection()
+        if conn and conn.waitForReadyRead(500):
+            data = conn.readAll().data()
+            if data == b"activate":
+                for widget in QApplication.topLevelWidgets():
+                    if isinstance(widget, QMainWindow):
+                        widget.showNormal()
+                        widget.raise_()
+                        widget.activateWindow()
+                        break
+
+    server.newConnection.connect(on_new_connection)
+    return True
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--lang', default=None, help='Force language, e.g. en, zh')
+    args, remaining = parser.parse_known_args()
+    
+    app = QApplication([sys.argv[0]] + remaining)
+    app.setStyle('Fusion')
+
+    # 单实例检查
+    if not ensure_single_instance(app):
+        print("[INFO] Another instance is already running. Activating it.")
+        sys.exit(0)
+
+    # 显示启动画面（必须在重模块导入之前，让用户立刻看到反馈）
+    splash = _show_splash(app)
+    
+    # 延迟导入重模块，减少启动前等待时间
+    global sf, np, ITU1770Meter, ChannelConfig, LoudnessResults, ReportExporter, BW64Parser, is_adm_file
+    import soundfile as sf
+    import numpy as np
+    from itu1770_meter import ITU1770Meter, ChannelConfig
+    from report_exporter import LoudnessResults, ReportExporter
+    from adm_parser import BW64Parser, is_adm_file
+    
+    # i18n: auto-detect system locale and load translation if available
+    from PySide6.QtCore import QTranslator, QLocale
+    translator = QTranslator()
+    
+    if args.lang:
+        # 强制指定语言
+        qm_path = _get_resource_path(f'i18n/LouDuck_{args.lang}.qm')
+        if not qm_path.exists():
+            # 尝试加上地区后缀
+            qm_path = _get_resource_path(f'i18n/LouDuck_{args.lang}_US.qm')
+    else:
+        # 跨平台读取系统显示语言
+        locale_name = QLocale.system().name()
+        try:
+            if sys.platform == 'win32':
+                import ctypes
+                import locale as py_locale
+                lang_id = ctypes.windll.kernel32.GetUserDefaultUILanguage()
+                locale_name = py_locale.windows_locale.get(lang_id, locale_name)
+            elif sys.platform == 'darwin':
+                # macOS: 读取 AppleLanguages
+                import subprocess
+                import ast
+                result = subprocess.run(
+                    ['defaults', 'read', '-g', 'AppleLanguages'],
+                    capture_output=True, text=True, check=True
+                )
+                langs = ast.literal_eval(result.stdout.strip())
+                if langs:
+                    locale_name = langs[0].replace('-', '_')
+        except Exception:
+            pass
+        qm_path = _get_resource_path(f'i18n/LouDuck_{locale_name}.qm')
+        if not qm_path.exists() and '_' in locale_name:
+            # fallback to language code only, e.g. "en" from "en_US"
+            lang = locale_name.split('_')[0]
+            qm_path = _get_resource_path(f'i18n/LouDuck_{lang}.qm')
+    
+    if qm_path.exists():
+        if translator.load(str(qm_path)):
+            app.installTranslator(translator)
+    
+    icon_path = _get_resource_path('assets/icon.ico')
+    if icon_path.exists():
+        from PySide6.QtGui import QIcon
+        app.setWindowIcon(QIcon(str(icon_path)))
+    win = LoudnessMeterApp()
+    splash.finish(win)
+    win.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
+"""
+mono_channel_matcher.py — 智能声道匹配模块
+
+从 main_gui.py 独立提取，保留原始智能声道匹配算法的完整实现。
+支持：
+- 多单声道 WAV 文件的智能声道识别
+- iXML 元数据读取
+- 点号分隔声道标识（如 2005.L.wav）
+- 正则匹配与模糊匹配
+- 5.1 / 7.1 / 5.1.4 / 7.1.4 等配置模板
+"""
+
+import re
+from pathlib import Path
+from typing import List, Tuple, Optional, Dict
+
+import soundfile as sf
+
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QComboBox, QListWidget, QLineEdit, QDialogButtonBox, QMessageBox
+)
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
+
+
+# 声道配置模板 - 改进版，支持多种命名变体
+CHANNEL_TEMPLATES = {
+    "Stereo (2.0)": {
+        "channels": ["L", "R"],
+        "patterns": [
+            r"(^|[^a-zA-Z.])(L|Left|FL|Front[_-]?Left)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(R|Right|FR|Front[_-]?Right)([^a-zA-Z0-9]|$)"
+        ]
+    },
+    "5.1 (6ch)": {
+        "channels": ["L", "R", "C", "LFE", "Ls", "Rs"],
+        "patterns": [
+            r"(^|[^a-zA-Z.])(L|Left|FL|Front[_-]?Left)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(R|Right|FR|Front[_-]?Right)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(C|Center|Centre|FC|Front[_-]?Center)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(LFE|Lfe|Sub|Subwoofer|SW)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(Ls|LS|Lss|Lsr|Left[_-]?Surround|Left[_-]?Rear|Surround[_-]?Left|SL|BL|Back[_-]?Left|Lrs)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(Rs|RS|Rss|Rsr|Right[_-]?Surround|Right[_-]?Rear|Surround[_-]?Right|SR|BR|Back[_-]?Right|Rrs)([^a-zA-Z0-9]|$)"
+        ]
+    },
+    "7.1 (8ch)": {
+        "channels": ["L", "R", "C", "LFE", "Lss", "Rss", "Lrs", "Rrs"],
+        "patterns": [
+            r"(^|[^a-zA-Z.])(L|Left|FL|Front[_-]?Left)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(R|Right|FR|Front[_-]?Right)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(C|Center|Centre|FC|Front[_-]?Center)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(LFE|Lfe|Sub|Subwoofer|SW)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(Lss|LSs|Left[_-]?Side|Side[_-]?Left|SL|Left[_-]?Side[_-]?Surround)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(Rss|RSs|Right[_-]?Side|Side[_-]?Right|SR|Right[_-]?Side[_-]?Surround)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(Lrs|LRs|Left[_-]?Rear|Rear[_-]?Left|LR|Back[_-]?Left|BL|Left[_-]?Back|Lsr)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(Rrs|RRs|Right[_-]?Rear|Rear[_-]?Right|RR|Back[_-]?Right|BR|Right[_-]?Back|Rsr)([^a-zA-Z0-9]|$)"
+        ]
+    },
+    "7.1.2 (10ch)": {
+        "channels": ["L", "R", "C", "LFE", "Lss", "Rss", "Lrs", "Rrs", "Ltf", "Rtf"],
+        "patterns": [
+            r"(^|[^a-zA-Z.])(L|Left|FL|Front[_-]?Left)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(R|Right|FR|Front[_-]?Right)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(C|Center|Centre|FC|Front[_-]?Center)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(LFE|Lfe|Sub|Subwoofer|SW)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(Lss|LSs|Left[_-]?Side|Side[_-]?Left|SL|Left[_-]?Side[_-]?Surround)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(Rss|RSs|Right[_-]?Side|Side[_-]?Right|SR|Right[_-]?Side[_-]?Surround)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(Lrs|LRs|Left[_-]?Rear|Rear[_-]?Left|LR|Back[_-]?Left|BL|Left[_-]?Back|Lsr)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(Rrs|RRs|Right[_-]?Rear|Rear[_-]?Right|RR|Back[_-]?Right|BR|Right[_-]?Back|Rsr)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(Ltf|LtF|Left[_-]?Top[_-]?Front|Top[_-]?Front[_-]?Left|TFL|Lft|Left[_-]?Front[_-]?Top)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(Rtf|RtF|Right[_-]?Top[_-]?Front|Top[_-]?Front[_-]?Right|TFR|Rft|Right[_-]?Front[_-]?Top)([^a-zA-Z0-9]|$)"
+        ]
+    },
+    "5.1.4 (10ch)": {
+        "channels": ["L", "R", "C", "LFE", "Ls", "Rs", "Ltf", "Rtf", "Ltr", "Rtr"],
+        "patterns": [
+            r"(^|[^a-zA-Z.])(L|Left|FL|Front[_-]?Left)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(R|Right|FR|Front[_-]?Right)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(C|Center|Centre|FC|Front[_-]?Center)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(LFE|Lfe|Sub|Subwoofer|SW)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(Ls|LS|Lss|Lsr|Left[_-]?Surround|Left[_-]?Rear|Surround[_-]?Left|SL|BL|Back[_-]?Left|Lrs)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(Rs|RS|Rss|Rsr|Right[_-]?Surround|Right[_-]?Rear|Surround[_-]?Right|SR|BR|Back[_-]?Right|Rrs)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(Ltf|LtF|Left[_-]?Top[_-]?Front|Top[_-]?Front[_-]?Left|TFL|Lft|Left[_-]?Front[_-]?Top)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(Rtf|RtF|Right[_-]?Top[_-]?Front|Top[_-]?Front[_-]?Right|TFR|Rft|Right[_-]?Front[_-]?Top)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(Ltr|LtR|Left[_-]?Top[_-]?Rear|Top[_-]?Rear[_-]?Left|TRL|Lrt|Left[_-]?Rear[_-]?Top|Ltb|Left[_-]?Top[_-]?Back)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(Rtr|RtR|Right[_-]?Top[_-]?Rear|Top[_-]?Rear[_-]?Right|TRR|Rrt|Right[_-]?Rear[_-]?Top|Rtb|Right[_-]?Top[_-]?Back)([^a-zA-Z0-9]|$)"
+        ]
+    },
+    "7.1.4 (12ch)": {
+        "channels": ["L", "R", "C", "LFE", "Lss", "Rss", "Lrs", "Rrs", "Ltf", "Rtf", "Ltb", "Rtb"],
+        "patterns": [
+            r"(^|[^a-zA-Z.])(L|Left|FL|Front[_-]?Left)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(R|Right|FR|Front[_-]?Right)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(C|Center|Centre|FC|Front[_-]?Center)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(LFE|Lfe|Sub|Subwoofer|SW)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(Lss|LSs|Left[_-]?Side|Side[_-]?Left|SL|Left[_-]?Side[_-]?Surround)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(Rss|RSs|Right[_-]?Side|Side[_-]?Right|SR|Right[_-]?Side[_-]?Surround)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(Lrs|LRs|Left[_-]?Rear|Rear[_-]?Left|LR|Back[_-]?Left|BL|Left[_-]?Back|Lsr)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(Rrs|RRs|Right[_-]?Rear|Rear[_-]?Right|RR|Back[_-]?Right|BR|Right[_-]?Back|Rsr)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(Ltf|LtF|Left[_-]?Top[_-]?Front|Top[_-]?Front[_-]?Left|TFL|Lft)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(Rtf|RtF|Right[_-]?Top[_-]?Front|Top[_-]?Front[_-]?Right|TFR|Rft)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(Ltb|LtB|Left[_-]?Top[_-]?Back|Top[_-]?Back[_-]?Left|TBL|Lbt)([^a-zA-Z0-9]|$)",
+            r"(^|[^a-zA-Z.])(Rtb|RtB|Right[_-]?Top[_-]?Back|Top[_-]?Back[_-]?Right|TBR|Rbt)([^a-zA-Z0-9]|$)"
+        ]
+    },
+}
+
+
+def _read_wav_channel_label(filepath: str) -> str:
+    """从 WAV/BWF 文件读取 iXML 声道标签"""
+    try:
+        with sf.SoundFile(filepath) as f:
+            extra = f.extra_info
+        if not extra or "<BWFXML>" not in extra:
+            return ""
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(extra)
+        for track_list in root.findall(".//TRACK_LIST"):
+            for track in track_list.findall("TRACK"):
+                name = track.findtext("NAME", "").strip()
+                if name:
+                    return name
+        return ""
+    except Exception:
+        return ""
+
+
+def _extract_channel_id(filename: str) -> str:
+    """从文件名提取声道标识，支持常见变体"""
+    dot_parts = filename.split(".")
+    if len(dot_parts) > 1:
+        suffix = dot_parts[-1].upper()
+        ch_map = {
+            'L': 'L', 'LEFT': 'L', 'FL': 'L',
+            'R': 'R', 'RIGHT': 'R', 'FR': 'R',
+            'C': 'C', 'CENTER': 'C', 'CENTRE': 'C', 'FC': 'C',
+            'LFE': 'LFE', 'SUB': 'LFE', 'SW': 'LFE', 'LFE1': 'LFE', 'LFE2': 'LFE',
+            'LS': 'Ls', 'LSS': 'Lss', 'SL': 'Ls', 'SSL': 'Lss',
+            'RS': 'Rs', 'RSS': 'Rss', 'SR': 'Rs', 'SSR': 'Rss',
+            'LRS': 'Lrs', 'LR': 'Lrs', 'BL': 'Lrs', 'LSR': 'Lrs', 'SRL': 'Lrs',
+            'RRS': 'Rrs', 'RR': 'Rrs', 'BR': 'Rrs', 'RSR': 'Rrs', 'SRR': 'Rrs',
+            'LTF': 'Ltf', 'TFL': 'Ltf', 'LFT': 'Ltf',
+            'RTF': 'Rtf', 'TFR': 'Rtf', 'RFT': 'Rtf',
+            'LTR': 'Ltr', 'TRL': 'Ltr', 'LRT': 'Ltr',
+            'RTR': 'Rtr', 'TRR': 'Rtr', 'RRT': 'Rtr',
+            'LTB': 'Ltb', 'TBL': 'Ltb', 'LBT': 'Ltb',
+            'RTB': 'Rtb', 'TBR': 'Rtb', 'RBT': 'Rtb',
+        }
+        if suffix in ch_map:
+            return ch_map[suffix]
+    n = filename.upper()
+    patterns = [
+        (r'(^|[^A-Za-z.])(LFE|SUB|SUBWOOFER|SW)([^A-Za-z.]|$)', 'LFE'),
+        (r'(^|[^A-Za-z.])(LTR|TRL)([^A-Za-z.]|$)', 'Ltr'),
+        (r'(^|[^A-Za-z.])(RTR|TRR)([^A-Za-z.]|$)', 'Rtr'),
+        (r'(^|[^A-Za-z.])(LTB|TBL|LEFT.*TOP.*BACK|BACK.*TOP.*LEFT|TOP.*BACK.*LEFT)([^A-Za-z.]|$)', 'Ltb'),
+        (r'(^|[^A-Za-z.])(RTB|TBR|RIGHT.*TOP.*BACK|BACK.*TOP.*RIGHT|TOP.*BACK.*RIGHT)([^A-Za-z.]|$)', 'Rtb'),
+        (r'(^|[^A-Za-z.])(LTF|TFL|LEFT.*TOP.*FRONT|FRONT.*TOP.*LEFT|TOP.*FRONT.*LEFT)([^A-Za-z.]|$)', 'Ltf'),
+        (r'(^|[^A-Za-z.])(RTF|TFR|RIGHT.*TOP.*FRONT|FRONT.*TOP.*RIGHT|TOP.*FRONT.*RIGHT)([^A-Za-z.]|$)', 'Rtf'),
+        (r'(^|[^A-Za-z.])(LSS|SSL|LEFT.*SIDE|SIDE.*LEFT)([^A-Za-z.]|$)', 'Lss'),
+        (r'(^|[^A-Za-z.])(RSS|SSR|RIGHT.*SIDE|SIDE.*RIGHT)([^A-Za-z.]|$)', 'Rss'),
+        (r'(^|[^A-Za-z.])(LRS|SRL|LEFT.*REAR|REAR.*LEFT|BACK.*LEFT)([^A-Za-z.]|$)', 'Lrs'),
+        (r'(^|[^A-Za-z.])(RRS|SRR|RIGHT.*REAR|REAR.*RIGHT|BACK.*RIGHT)([^A-Za-z.]|$)', 'Rrs'),
+        (r'(^|[^A-Za-z.])(LS|LEFT.*SURROUND|SURROUND.*LEFT)([^A-Za-z.]|$)', 'Ls'),
+        (r'(^|[^A-Za-z.])(RS|RIGHT.*SURROUND|SURROUND.*RIGHT)([^A-Za-z.]|$)', 'Rs'),
+        (r'(^|[^A-Za-z.])(FC|FRONT.*CENTER|CENTER.*FRONT)([^A-Za-z.]|$)', 'C'),
+        (r'(^|[^A-Za-z.])(FL|FRONT.*LEFT)([^A-Za-z.]|$)', 'L'),
+        (r'(^|[^A-Za-z.])(FR|FRONT.*RIGHT)([^A-Za-z.]|$)', 'R'),
+        (r'(^|[^A-Za-z.])(CENTER|CENTRE)([^A-Za-z.]|$)', 'C'),
+        (r'(^|[^A-Za-z.])C([^A-Za-z.]|$)', 'C'),
+        (r'(^|[^A-Za-z.])LEFT([^A-Za-z.]|$)', 'L'),
+        (r'(^|[^A-Za-z.])RIGHT([^A-Za-z.]|$)', 'R'),
+        (r'(^|[^A-Za-z.])L([^A-Za-z.]|$)', 'L'),
+        (r'(^|[^A-Za-z.])R([^A-Za-z.]|$)', 'R'),
+    ]
+    for pattern, ch_id in patterns:
+        if re.search(pattern, n):
+            return ch_id
+    return ""
+
+
+def _guess_channel_by_index(file_count: int, file_index: int) -> str:
+    """根据文件数量和索引推测声道标识（用于自定义模式回退）"""
+    configs = {
+        2: ['L', 'R'],
+        6: ['L', 'R', 'C', 'LFE', 'Ls', 'Rs'],
+        8: ['L', 'R', 'C', 'LFE', 'Lss', 'Rss', 'Lrs', 'Rrs'],
+        10: ['L', 'R', 'C', 'LFE', 'Ls', 'Rs', 'Ltf', 'Rtf', 'Ltr', 'Rtr'],
+        12: ['L', 'R', 'C', 'LFE', 'Lss', 'Rss', 'Lrs', 'Rrs', 'Ltf', 'Rtf', 'Ltb', 'Rtb'],
+    }
+    if file_count in configs and file_index < len(configs[file_count]):
+        return configs[file_count][file_index]
+    return ""
+
+
+def auto_match_mono_files(
+    file_paths: List[str],
+    template_name: Optional[str] = None
+) -> List[Tuple[str, str]]:
+    """
+    对单声道 WAV 文件列表进行智能声道匹配（零 GUI 依赖）。
+
+    这是从 SmartMultiMonoDialog.auto_match() 完整提取的独立版本，
+    打分逻辑与弹窗版完全一致，可用于无界面自动匹配或单元测试。
+
+    Args:
+        file_paths: 文件路径列表
+        template_name: 指定模板名称，None 则根据文件数量自动选择
+
+    Returns:
+        [(文件路径, 声道标识), ...] 按模板声道顺序排列
+    """
+    if not file_paths:
+        return []
+
+    # 自动选择模板
+    if template_name is None:
+        cfg_map = {
+            2: 'Stereo (2.0)',
+            6: '5.1 (6ch)',
+            8: '7.1 (8ch)',
+            10: '5.1.4 (10ch)',
+            12: '7.1.4 (12ch)',
+        }
+        template_name = cfg_map.get(len(file_paths), None)
+
+    selected = [(p, "?") for p in file_paths]
+
+    # ---------- 自定义模式 ----------
+    if not template_name or template_name not in CHANNEL_TEMPLATES:
+        for i, (path, _) in enumerate(selected):
+            # 1. iXML
+            ixml_label = _read_wav_channel_label(path)
+            if ixml_label:
+                selected[i] = (path, ixml_label)
+                continue
+            # 2. 文件名识别
+            name = Path(path).stem
+            ch_id = _extract_channel_id(name)
+            if ch_id:
+                selected[i] = (path, ch_id)
+            else:
+                # 3. 按数量推断
+                guessed = _guess_channel_by_index(len(selected), i)
+                selected[i] = (path, guessed if guessed else "?")
+        return selected
+
+    # ---------- 模板模式 ----------
+    config = CHANNEL_TEMPLATES[template_name]
+    channels = config["channels"]
+    patterns = config["patterns"]
+
+    # 重置
+    for i, (path, _) in enumerate(selected):
+        selected[i] = (path, "?")
+
+    matched_indices = set()
+
+    for ch_idx, (ch_name, pattern) in enumerate(zip(channels, patterns)):
+        best_match = -1
+        best_score = -1
+
+        for file_idx, (path, _) in enumerate(selected):
+            if file_idx in matched_indices:
+                continue
+
+            filename = Path(path).stem
+            dot_parts = filename.split('.')
+            after_dot = dot_parts[-1] if len(dot_parts) > 1 else ""
+
+            score = 0
+            match_pos = -1
+
+            # 0. iXML 元数据（最高优先级，10000 分）
+            ixml_label = _read_wav_channel_label(path)
+            if ixml_label and ixml_label.upper() == ch_name.upper():
+                score = 10000
+                match_pos = 0
+            # 1. _extract_channel_id（5000 分）
+            else:
+                extracted_id = _extract_channel_id(filename)
+                if extracted_id and extracted_id.upper() == ch_name.upper():
+                    score = 5000
+                    match_pos = filename.rfind('.' + after_dot)
+                else:
+                    score = 0
+
+            # 2. 点号后完全匹配（2000 分）
+            if score == 0 and after_dot.upper() == ch_name.upper():
+                score = 2000
+                match_pos = filename.rfind('.' + after_dot)
+            # 3. 点号后正则匹配（1500 分）
+            elif score == 0 and re.search(pattern, after_dot, re.IGNORECASE):
+                score = 1500
+                match_pos = filename.rfind('.' + after_dot)
+            # 4. 整个文件名完全匹配（1000 分）
+            elif score == 0 and filename.upper() == ch_name.upper():
+                score = 1000
+                match_pos = 0
+            # 5. 整个文件名正则匹配（500 分 + 位置）
+            elif score == 0 and re.search(pattern, filename, re.IGNORECASE):
+                match = re.search(pattern, filename, re.IGNORECASE)
+                score = 500
+                match_pos = match.start()
+                score += match_pos
+            # 6. 模糊匹配（100 分 + 位置）
+            elif score == 0 and ch_name.upper() in filename.upper():
+                score = 100
+                match_pos = filename.upper().find(ch_name.upper())
+                score += match_pos
+
+            if score > best_score:
+                best_score = score
+                best_match = file_idx
+
+        if best_match >= 0 and best_score > 0:
+            matched_indices.add(best_match)
+            selected[best_match] = (selected[best_match][0], channels[ch_idx])
+
+    # 按声道顺序排序
+    def sort_key(item):
+        _, ch_name = item
+        if ch_name == "?":
+            return 9999
+        if ch_name in channels:
+            return channels.index(ch_name)
+        return 9998
+
+    selected.sort(key=sort_key)
+    return selected
+
+
+class SmartMultiMonoDialog(QDialog):
+    """智能声道匹配对话框 - 改进版，支持点号分隔的声道标识"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("智能声道匹配")
+        self.setMinimumSize(800, 550)
+
+        self.selected_files: List[Tuple[str, str]] = []
+        self.current_template = None
+
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        # 模板选择
+        template_layout = QHBoxLayout()
+        template_layout.addWidget(QLabel("声道模板:"))
+        self.template_combo = QComboBox()
+        self.template_combo.addItems(list(CHANNEL_TEMPLATES.keys()) + ["自定义"])
+        self.template_combo.currentTextChanged.connect(self.on_template_changed)
+        template_layout.addWidget(self.template_combo)
+
+        self.expected_count_label = QLabel("")
+        template_layout.addWidget(self.expected_count_label)
+        template_layout.addStretch()
+        layout.addLayout(template_layout)
+
+        # 显示预期声道顺序
+        order_layout = QHBoxLayout()
+        order_layout.addWidget(QLabel("预期声道顺序:"))
+        self.order_display = QLabel("-")
+        self.order_display.setStyleSheet("color: #667eea; font-weight: bold;")
+        order_layout.addWidget(self.order_display)
+        order_layout.addStretch()
+        layout.addLayout(order_layout)
+
+        # 三栏布局
+        main_layout = QHBoxLayout()
+
+        # 左：预期声道列表
+        left_layout = QVBoxLayout()
+        left_layout.addWidget(QLabel("预期声道:"))
+        self.expected_list = QListWidget()
+        self.expected_list.setMaximumWidth(100)
+        left_layout.addWidget(self.expected_list)
+
+        # 中：匹配结果
+        center_layout = QVBoxLayout()
+        center_layout.addWidget(QLabel("匹配结果 (声道 ← 文件):"))
+        self.match_list = QListWidget()
+        self.match_list.setMinimumWidth(400)
+        center_layout.addWidget(self.match_list)
+
+        # 右：操作按钮
+        right_layout = QVBoxLayout()
+        right_layout.addWidget(QLabel("操作:"))
+        right_layout.addSpacing(10)
+
+        self.auto_match_btn = QPushButton("🎯 自动匹配")
+        self.auto_match_btn.setToolTip("根据文件名后缀自动识别声道")
+        self.auto_match_btn.clicked.connect(self.auto_match)
+        right_layout.addWidget(self.auto_match_btn)
+
+        self.add_btn = QPushButton("➕ 添加文件")
+        self.add_btn.clicked.connect(self.add_files)
+        right_layout.addWidget(self.add_btn)
+
+        self.clear_btn = QPushButton("🗑 清空")
+        self.clear_btn.clicked.connect(self.clear_all)
+        right_layout.addWidget(self.clear_btn)
+
+        right_layout.addStretch()
+
+        main_layout.addLayout(left_layout, 1)
+        main_layout.addLayout(center_layout, 4)
+        main_layout.addLayout(right_layout, 1)
+        layout.addLayout(main_layout)
+
+        # 显示选中文件路径
+        layout.addWidget(QLabel("文件路径:"))
+        self.path_display = QLineEdit()
+        self.path_display.setReadOnly(True)
+        self.path_display.setPlaceholderText("未选择文件")
+        layout.addWidget(self.path_display)
+
+        # 状态信息
+        self.status_label = QLabel("请选择模板并添加文件")
+        self.status_label.setStyleSheet("color: #888;")
+        layout.addWidget(self.status_label)
+
+        # 按钮
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.on_ok)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self.update_template_display()
+
+    def on_template_changed(self, template_name):
+        self.current_template = template_name if template_name in CHANNEL_TEMPLATES else None
+        self.update_template_display()
+
+    def update_template_display(self):
+        self.expected_list.clear()
+
+        if self.current_template and self.current_template in CHANNEL_TEMPLATES:
+            config = CHANNEL_TEMPLATES[self.current_template]
+            channels = config["channels"]
+            self.order_display.setText(" → ".join(channels))
+            self.expected_count_label.setText(f"({len(channels)} 声道)")
+
+            for ch in channels:
+                self.expected_list.addItem(ch)
+        else:
+            self.order_display.setText("自定义 (无固定顺序)")
+            self.expected_count_label.setText("")
+
+    def add_files(self):
+        from PySide6.QtWidgets import QFileDialog  # lazy import to avoid circular deps
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "选择单声道WAV文件", "", "WAV文件 (*.wav)"
+        )
+        if not files:
+            return
+
+        for path in files:
+            try:
+                info = sf.info(path)
+                if info.channels != 1:
+                    QMessageBox.warning(self, "跳过", f"{Path(path).name}: 不是单声道({info.channels}ch)")
+                    continue
+
+                self.selected_files.append((path, "?"))
+
+            except Exception as e:
+                QMessageBox.warning(self, "错误", f"{Path(path).name}: {e}")
+
+        self.update_match_display()
+        self.update_path_display()
+
+        if self.current_template:
+            self.auto_match()
+
+    def auto_match(self):
+        """根据文件名后缀智能匹配 - 改进版，支持点号分隔的声道标识"""
+        if not self.selected_files:
+            return
+
+        if not self.current_template or self.current_template not in CHANNEL_TEMPLATES:
+            # 自定义模式：优先 iXML，回退到文件名识别，最后按数量推断
+            for i, (path, _) in enumerate(self.selected_files):
+                if self.selected_files[i][1] == "?":
+                    # 1. 尝试读取 iXML 元数据
+                    ixml_label = _read_wav_channel_label(path)
+                    if ixml_label:
+                        self.selected_files[i] = (path, ixml_label)
+                        continue
+                    # 2. 回退到文件名识别
+                    name = Path(path).stem
+                    ch_id = _extract_channel_id(name)
+                    if ch_id:
+                        self.selected_files[i] = (path, ch_id)
+                    else:
+                        # 3. 根据文件数量和顺序推断标准配置
+                        guessed = _guess_channel_by_index(len(self.selected_files), i)
+                        if guessed:
+                            self.selected_files[i] = (path, guessed)
+                        else:
+                            self.selected_files[i] = (path, "?")
+            self.update_match_display()
+            return
+
+        config = CHANNEL_TEMPLATES[self.current_template]
+        channels = config["channels"]
+        patterns = config["patterns"]
+
+        # 重置所有匹配
+        for i, (path, _) in enumerate(self.selected_files):
+            self.selected_files[i] = (path, "?")
+
+        matched_indices = set()
+
+        for ch_idx, (ch_name, pattern) in enumerate(zip(channels, patterns)):
+            best_match = -1
+            best_score = -1
+
+            for file_idx, (path, current_ch) in enumerate(self.selected_files):
+                if file_idx in matched_indices:
+                    continue
+
+                filename = Path(path).stem
+
+                # 提取点号后的部分（如 "2005.C" -> "C"）
+                dot_parts = filename.split('.')
+                after_dot = dot_parts[-1] if len(dot_parts) > 1 else ""
+
+                score = 0
+                match_pos = -1
+
+                # 0. 优先 iXML 元数据（最高优先级，10000分）
+                ixml_label = _read_wav_channel_label(path)
+                if ixml_label and ixml_label.upper() == ch_name.upper():
+                    score = 10000
+                    match_pos = 0
+                # 1. 使用 _extract_channel_id 映射（高优先级，5000分）
+                else:
+                    extracted_id = _extract_channel_id(filename)
+                    if extracted_id and extracted_id.upper() == ch_name.upper():
+                        score = 5000
+                        match_pos = filename.rfind('.' + after_dot)
+                    else:
+                        score = 0
+
+                # 2. 点号后完全匹配（2000分）
+                if score == 0 and after_dot.upper() == ch_name.upper():
+                    score = 2000
+                    match_pos = filename.rfind('.' + after_dot)
+                # 3. 点号后正则匹配（1500分）
+                elif score == 0 and re.search(pattern, after_dot, re.IGNORECASE):
+                    score = 1500
+                    match_pos = filename.rfind('.' + after_dot)
+                # 4. 整个文件名完全匹配（1000分）
+                elif score == 0 and filename.upper() == ch_name.upper():
+                    score = 1000
+                    match_pos = 0
+                # 5. 整个文件名正则匹配（500分+位置）
+                elif score == 0 and re.search(pattern, filename, re.IGNORECASE):
+                    match = re.search(pattern, filename, re.IGNORECASE)
+                    score = 500
+                    match_pos = match.start()
+                    score += match_pos
+                # 6. 模糊匹配（100分+位置）
+                elif score == 0 and ch_name.upper() in filename.upper():
+                    score = 100
+                    match_pos = filename.upper().find(ch_name.upper())
+                    score += match_pos
+
+                if score > best_score:
+                    best_score = score
+                    best_match = file_idx
+
+            if best_match >= 0 and best_score > 0:
+                matched_indices.add(best_match)
+                path = self.selected_files[best_match][0]
+                self.selected_files[best_match] = (path, channels[ch_idx])
+
+        self.update_match_display()
+
+    def update_match_display(self):
+        """更新匹配显示（按当前模板的预期声道顺序排列）"""
+        self.match_list.clear()
+
+        # 根据当前模板获取预期声道顺序，自定义模式使用通用 fallback
+        if self.current_template and self.current_template in CHANNEL_TEMPLATES:
+            ch_order = CHANNEL_TEMPLATES[self.current_template]["channels"]
+        else:
+            ch_order = ['L', 'R', 'C', 'LFE', 'Ls', 'Rs', 'Lss', 'Rss', 'Lrs', 'Rrs', 'Ltf', 'Rtf', 'Ltr', 'Rtr', 'Ltb', 'Rtb']
+
+        def sort_key(item):
+            _, ch_name = item
+            if ch_name == "?":
+                return 9999
+            if ch_name in ch_order:
+                return ch_order.index(ch_name)
+            return 9998
+
+        # 按声道顺序排序显示
+        sorted_files = sorted(self.selected_files, key=sort_key)
+
+        for path, ch_name in sorted_files:
+            filename = Path(path).name
+
+            if ch_name == "?":
+                display = f"[未匹配]  ←  {filename}"
+                self.match_list.addItem(display)
+                self.match_list.item(self.match_list.count() - 1).setForeground(QColor("#e74c3c"))
+            else:
+                # 检测是否来自 iXML
+                ixml_label = _read_wav_channel_label(path)
+                source = "📋iXML" if ixml_label == ch_name else "🔤文件名"
+                display = f"[{ch_name}] {source} ←  {filename}"
+                self.match_list.addItem(display)
+                self.match_list.item(self.match_list.count() - 1).setForeground(QColor("#27ae60"))
+
+        # 更新状态
+        total = len(self.selected_files)
+        matched = sum(1 for _, ch in self.selected_files if ch != "?")
+
+        if self.current_template:
+            expected = len(CHANNEL_TEMPLATES[self.current_template]["channels"])
+            if matched == expected and total == expected:
+                self.status_label.setText(f"✓ 完美匹配: {matched}/{expected} 声道")
+                self.status_label.setStyleSheet("color: #27ae60;")
+            else:
+                self.status_label.setText(f"已匹配: {matched}/{total} | 预期: {expected} 声道")
+                self.status_label.setStyleSheet("color: #f39c12;" if matched < expected else "color: #27ae60;")
+        else:
+            self.status_label.setText(f"文件数: {total} | 自定义模式")
+            self.status_label.setStyleSheet("color: #888;")
+
+    def update_path_display(self):
+        """显示选中文件路径"""
+        if self.selected_files:
+            first_dir = Path(self.selected_files[0][0]).parent
+            self.path_display.setText(str(first_dir))
+        else:
+            self.path_display.setText("")
+
+    def clear_all(self):
+        self.selected_files = []
+        self.match_list.clear()
+        self.path_display.setText("")
+        self.status_label.setText("请选择模板并添加文件")
+        self.status_label.setStyleSheet("color: #888;")
+
+    def on_ok(self):
+        if not self.selected_files:
+            QMessageBox.warning(self, "警告", "请至少添加一个文件")
+            return
+
+        for path, ch in self.selected_files:
+            if not Path(path).exists():
+                QMessageBox.critical(self, "错误", f"文件不存在:\n{path}")
+                return
+
+        unmatched = [Path(p).name for p, c in self.selected_files if c == "?"]
+        if unmatched:
+            reply = QMessageBox.question(
+                self, "未匹配声道",
+                f"以下文件未匹配:\n" + "\n".join(unmatched[:5]) + f"\n\n是否继续？",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply == QMessageBox.No:
+                return
+
+        self.accept()
+
+    def get_files(self) -> List[Tuple[str, str]]:
+        """获取按声道顺序排序后的文件列表"""
+        sorted_files = sorted(self.selected_files, key=lambda x: x[1])
+        return [(p, c) for p, c in sorted_files if c != "?"]
+"""检测报告导出器 (整合修复版)"""
+
+import json
+import csv
+from datetime import datetime
+from dataclasses import dataclass
+from typing import List
+from pathlib import Path
+from PySide6.QtCore import QCoreApplication
+
+
+@dataclass
+class LoudnessResults:
+    """测量结果数据结构"""
+    integrated: float
+    short_term: float
+    momentary: float
+    true_peak: float
+    lra: float
+    max_true_peak: float
+    duration: float
+    filename: str
+    sample_rate: int
+    channels: int
+    blocks: List[float]
+    measurement_time: str = ""
+    # 文件信息
+    file_path: str = ""
+    file_name: str = ""
+    adm_info: str = ""
+    renderer_info: str = ""
+    authoring_info: str = ""
+    ref_layout: str = ""
+    mono_files: list = None
+    
+    def __post_init__(self):
+        if not self.measurement_time:
+            self.measurement_time = datetime.now().isoformat()
+        if self.mono_files is None:
+            self.mono_files = []
+
+
+class ReportExporter:
+    """报告导出器"""
+    
+    def __init__(self, results: LoudnessResults):
+        self.results = results
+    
+    def export_txt(self, path: str) -> str:
+        """导出 TXT"""
+        lines = [
+            "=" * 60,
+            QCoreApplication.translate("ReportExporter", "      ITU-R BS.1770-5 Loudness Measurement Report"),
+            "=" * 60,
+            "",
+            QCoreApplication.translate("ReportExporter", "测量时间: {time}").format(time=self.results.measurement_time),
+            QCoreApplication.translate("ReportExporter", "文件路径: {path}").format(path=self.results.file_path or "-"),
+            QCoreApplication.translate("ReportExporter", "文件名称: {name}").format(name=self.results.file_name or self.results.filename),
+            QCoreApplication.translate("ReportExporter", "时长:     {duration}").format(duration=self._format_duration(self.results.duration)),
+            QCoreApplication.translate("ReportExporter", "采样率:   {sr} Hz").format(sr=self.results.sample_rate),
+            QCoreApplication.translate("ReportExporter", "声道数:   {ch}").format(ch=self.results.channels),
+        ]
+        
+        # ADM / 渲染器信息
+        if self.results.adm_info:
+            lines.extend([
+                "",
+                "-" * 60,
+                QCoreApplication.translate("ReportExporter", "ADM 信息:"),
+                "-" * 60,
+                self.results.adm_info,
+            ])
+        if self.results.renderer_info:
+            lines.append(QCoreApplication.translate("ReportExporter", "渲染器:   {info}").format(info=self.results.renderer_info))
+        if self.results.authoring_info:
+            lines.append(QCoreApplication.translate("ReportExporter", "创作软件: {info}").format(info=self.results.authoring_info))
+        if self.results.ref_layout:
+            lines.append(QCoreApplication.translate("ReportExporter", "参考布局: {layout}").format(layout=self.results.ref_layout))
+        
+        # 多单声道文件列表
+        if self.results.mono_files:
+            lines.extend([
+                "",
+                "-" * 60,
+                QCoreApplication.translate("ReportExporter", "多单声道文件列表:"),
+                "-" * 60,
+            ])
+            for item in self.results.mono_files:
+                lines.append(f"  [{item.get('channel', '?')}] {item.get('name', '')}")
+        
+        lines.extend([
+            "",
+            "-" * 60,
+            QCoreApplication.translate("ReportExporter", "测量结果:"),
+            "-" * 60,
+            QCoreApplication.translate("ReportExporter", "  节目响度:      {val:+.2f} LKFS").format(val=self.results.integrated),
+            QCoreApplication.translate("ReportExporter", "  最大短时响度:  {val:+.2f} LKFS").format(val=self.results.short_term),
+            QCoreApplication.translate("ReportExporter", "  最大瞬时响度:  {val:+.2f} LKFS").format(val=self.results.momentary),
+            QCoreApplication.translate("ReportExporter", "  最大真峰值:    {val:+.2f} dBTP").format(val=self.results.true_peak),
+            QCoreApplication.translate("ReportExporter", "  响度范围:      {val:.2f} LU").format(val=self.results.lra),
+            "",
+            QCoreApplication.translate("ReportExporter", "合规性:"),
+            QCoreApplication.translate("ReportExporter", "  EBU R128:  {status}").format(status=(QCoreApplication.translate("ReportExporter", "通过") if abs(self.results.integrated - (-23)) <= 1.0 else QCoreApplication.translate("ReportExporter", "未通过"))),
+            QCoreApplication.translate("ReportExporter", "  真峰值:    {status}").format(status=(QCoreApplication.translate("ReportExporter", "通过") if self.results.true_peak <= -1.0 else QCoreApplication.translate("ReportExporter", "超标"))),
+            "=" * 60,
+        ])
+        
+        content = "\n".join(lines)
+        Path(path).write_text(content, encoding='utf-8')
+        return content
+    
+    def export_json(self, path: str) -> str:
+        """导出 JSON"""
+        data = {
+            "metadata": {
+                "version": "1.0",
+                "standard": "ITU-R BS.1770-5",
+                "measurement_time": self.results.measurement_time
+            },
+            "file_info": {
+                "file_path": self.results.file_path,
+                "file_name": self.results.file_name or self.results.filename,
+                "filename": self.results.filename,
+                "duration": self.results.duration,
+                "sample_rate": self.results.sample_rate,
+                "channels": self.results.channels,
+                "adm_info": self.results.adm_info,
+                "renderer_info": self.results.renderer_info,
+                "authoring_info": self.results.authoring_info,
+                "ref_layout": self.results.ref_layout,
+                "mono_files": self.results.mono_files
+            },
+            "measurements": {
+                "integrated_lufs": round(self.results.integrated, 4),
+                "short_term_lufs": round(self.results.short_term, 4),
+                "momentary_lufs": round(self.results.momentary, 4),
+                "true_peak_dbtp": round(self.results.true_peak, 4),
+                "loudness_range_lu": round(self.results.lra, 4)
+            },
+            "compliance": {
+                "ebu_r128": bool(abs(self.results.integrated - (-23)) <= 1.0),
+                "true_peak_limit": bool(self.results.true_peak <= -1.0)
+            }
+        }
+        
+        content = json.dumps(data, ensure_ascii=False, indent=2)
+        Path(path).write_text(content, encoding='utf-8')
+        return content
+    
+    def export_csv(self, path: str) -> str:
+        """导出 CSV"""
+        with open(path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            
+            # 文件信息
+            writer.writerow(["File Path", self.results.file_path])
+            writer.writerow(["File Name", self.results.file_name or self.results.filename])
+            if self.results.adm_info:
+                writer.writerow(["ADM Info", self.results.adm_info.replace('\n', ' ')])
+            if self.results.renderer_info:
+                writer.writerow(["Renderer", self.results.renderer_info])
+            if self.results.authoring_info:
+                writer.writerow(["Authoring", self.results.authoring_info])
+            if self.results.ref_layout:
+                writer.writerow(["Ref Layout", self.results.ref_layout])
+            if self.results.mono_files:
+                for item in self.results.mono_files:
+                    writer.writerow([f"Channel {item.get('channel', '?')}", item.get('path', '')])
+            writer.writerow([])
+            
+            writer.writerow(["Metric", "Value", "Unit", "Target", "Status"])
+            
+            rows = [
+                [QCoreApplication.translate("ReportExporter", "节目响度"), f"{self.results.integrated:.4f}", "LKFS", "-23.0", 
+                 "Pass" if abs(self.results.integrated - (-23)) <= 1.0 else "Fail"],
+                [QCoreApplication.translate("ReportExporter", "最大短时响度"), f"{self.results.short_term:.4f}", "LKFS", "-23.0", "-"],
+                [QCoreApplication.translate("ReportExporter", "最大瞬时响度"), f"{self.results.momentary:.4f}", "LKFS", "-", "-"],
+                [QCoreApplication.translate("ReportExporter", "最大真峰值"), f"{self.results.true_peak:.4f}", "dBTP", "-1.0",
+                 "Pass" if self.results.true_peak <= -1.0 else "Fail"],
+                [QCoreApplication.translate("ReportExporter", "响度范围"), f"{self.results.lra:.4f}", "LU", "-", "-"],
+            ]
+            writer.writerows(rows)
+        
+        return path
+    
+    def _format_duration(self, seconds: float) -> str:
+        """格式化时长"""
+        m = int(seconds // 60)
+        s = int(seconds % 60)
+        ms = int((seconds % 1) * 1000)
+        return f"{m:02d}:{s:02d}.{ms:03d}"
+"""
+Immersive Audio Renderers
+支持 Dolby Atmos 和 Audio Vivid (ADM 格式) 的渲染
+"""
+
+from .ear_renderer import render_adm, get_supported_layouts, get_adm_info, is_object_based_adm
+
+__all__ = [
+    "render_adm",
+    "get_supported_layouts",
+    "get_adm_info",
+    "is_object_based_adm",
+]
+"""
+EBU ADM Renderer (EAR) 包装层
+支持 Dolby Atmos 和 Audio Vivid (ADM 格式) 渲染到标准扬声器布局
+
+依赖: pip install ear
+注意: Python 3.14 + setuptools 82+ 需要手动 patch pkg_resources -> importlib.resources
+"""
+
+import re
+import struct
+import tempfile
+from pathlib import Path
+from typing import Optional, List
+
+from ear.cmdline.render_file import OfflineRenderDriver, PeakMonitor
+from ear.core.bs2051 import layout_names, get_layout
+from ear.fileio import openBw64, openBw64Adm
+from ear.fileio.bw64.chunks import FormatInfoChunk
+from ear.fileio.adm import timing_fixes
+
+
+# 友好名称 -> EAR 系统名称 (ITU-R BS.2051)
+LAYOUT_MAP = {
+    "Stereo (2.0)": "0+2+0",
+    "5.1 (6ch)": "0+5+0",
+    "7.1 (8ch)": "0+7+0",
+    "5.1.4 (10ch)": "4+5+0",
+    "7.1.4 (12ch)": "4+7+0",
+    "9.1.6 (16ch)": "4+9+0",
+    "22.2 (24ch)": "9+10+3",
+}
+
+# 用于修复 Pro Tools / Dolby Atmos ADM 中 audioStreamFormat 的双重引用
+_AUDIOSTREAM_RE = re.compile(
+    r'(<audioStreamFormat\b[^>]*>)(.*?)(</audioStreamFormat>)',
+    re.DOTALL
+)
+
+
+def _fix_adm_xml(axml_data: bytes) -> bytes:
+    """
+    修复 ADM XML：
+    1. 移除 audioStreamFormat 中同时存在的 audioPackFormatIDRef。
+    2. 将 Room-Centric 风格的 LFE speakerLabel 映射为标准 ITU 标签 LFE1，
+       确保 EAR 正确识别并路由到目标布局的 LFE 声道。
+    """
+    xml_str = axml_data.decode('utf-8')
+
+    def _fix_stream_block(m):
+        open_tag = m.group(1)
+        body = m.group(2)
+        close_tag = m.group(3)
+        has_channel = '<audioChannelFormatIDRef>' in body
+        has_pack = '<audioPackFormatIDRef>' in body
+        if has_channel and has_pack:
+            body = re.sub(
+                r'\s*<audioPackFormatIDRef>[^<]+</audioPackFormatIDRef>\s*',
+                '',
+                body,
+            )
+        return open_tag + body + close_tag
+
+    xml_str = _AUDIOSTREAM_RE.sub(_fix_stream_block, xml_str)
+
+    # 修复 Room-Centric LFE speakerLabel：RC_LFE / RoomCentricLFE 等 → LFE1
+    xml_str = re.sub(
+        r'(<speakerLabel>)(RC_LFE|RoomCentricLFE|LFE_RoomCentric)(</speakerLabel>)',
+        r'\1LFE1\3',
+        xml_str,
+    )
+
+    return xml_str.encode('utf-8')
+
+
+def _create_fixed_bw64(input_path: str) -> str:
+    """
+    复制 BW64/RIFF 文件，修复 axml chunk 中的 audioStreamFormat 双重引用。
+    返回临时文件路径。
+    """
+    with open(input_path, 'rb') as f:
+        data = bytearray(f.read())
+
+    # 遍历 RIFF chunk 找到 axml
+    pos = 12  # 跳过 12 字节 BW64/RIFF header
+    axml_data_pos = None
+    axml_data_size = None
+
+    while pos < len(data):
+        chunk_id = data[pos:pos + 4]
+        if len(chunk_id) < 4:
+            break
+        chunk_size = struct.unpack('<I', data[pos + 4:pos + 8])[0]
+
+        if chunk_id == b'axml':
+            axml_data_pos = pos + 8
+            axml_data_size = chunk_size
+            break
+
+        pos += 8 + chunk_size + (chunk_size % 2)
+
+    if axml_data_pos is None:
+        raise ValueError("文件不包含 axml chunk")
+
+    axml_data = bytes(data[axml_data_pos:axml_data_pos + axml_data_size])
+    fixed_xml = _fix_adm_xml(axml_data)
+
+    old_padded = axml_data_size + (axml_data_size % 2)
+    new_padded = len(fixed_xml) + (len(fixed_xml) % 2)
+
+    new_data = bytearray()
+    new_data.extend(data[:axml_data_pos])          # header + axml chunk header
+    new_data.extend(fixed_xml)
+    if len(fixed_xml) % 2:
+        new_data.append(0)
+    new_data.extend(data[axml_data_pos + old_padded:])  # 剩余部分
+
+    # 更新 axml chunk size
+    struct.pack_into('<I', new_data, axml_data_pos - 4, len(fixed_xml))
+    # 更新文件总大小（从 WAVE 之后算起）
+    struct.pack_into('<I', new_data, 4, len(new_data) - 8)
+
+    temp_path = str(
+        Path(tempfile.gettempdir()) / f"fixed_{Path(input_path).name}"
+    )
+    with open(temp_path, 'wb') as f:
+        f.write(new_data)
+
+    return temp_path
+
+
+def get_supported_layouts() -> List[str]:
+    """获取支持的渲染目标布局列表"""
+    return list(LAYOUT_MAP.keys())
+
+
+def is_object_based_adm(filepath: str) -> bool:
+    """检查 ADM 文件是否包含基于对象的音频（如 Dolby Atmos / Audio Vivid）"""
+    # 优先使用 EAR 原生解析
+    try:
+        from ear.fileio import openBw64Adm
+        with openBw64Adm(filepath) as infile:
+            adm = infile.adm
+            if adm is not None:
+                objects = getattr(adm, "audio_objects", [])
+                if len(objects) > 0:
+                    return True
+    except Exception:
+        pass
+
+    # 后备：使用 adm_parser 检测（避免 EAR Python 3.14 兼容性问题）
+    try:
+        import sys
+        from pathlib import Path
+        src_dir = str(Path(__file__).parent.parent)
+        if src_dir not in sys.path:
+            sys.path.insert(0, src_dir)
+        from adm_parser import BW64Parser
+        adm = BW64Parser(filepath).parse()
+        if adm:
+            objects_ch = [ch for ch in adm.channel_formats if ch.type == 'Objects']
+            return len(objects_ch) > 0
+    except Exception:
+        pass
+
+    return False
+
+
+def get_adm_info(filepath: str) -> dict:
+    """获取 ADM 文件的基本信息"""
+    try:
+        from ear.fileio import openBw64Adm
+        with openBw64Adm(filepath) as infile:
+            adm = infile.adm
+            if adm is None:
+                return {"error": "文件不包含有效的 ADM 元数据"}
+            objects = getattr(adm, "audio_objects", [])
+            beds = [
+                o for o in objects
+                if not hasattr(o, "audio_object_interaction") or o.audio_object_interaction is None
+            ]
+            return {
+                "programmes": len(getattr(adm, "audio_programmes", [])),
+                "objects": len(objects),
+                "beds": len(beds),
+                "sample_rate": getattr(infile, "sampleRate", 48000),
+                "channels": getattr(infile, "channels", 0),
+                "duration": getattr(infile, "duration", 0.0),
+                "is_object_based": len(objects) > 0,
+            }
+    except Exception as e:
+        msg = str(e)
+        if "audioIDs" in msg or "adm" in msg.lower() or "NoneType" in msg:
+            return {"error": "文件不包含有效的 ADM 元数据"}
+        return {"error": msg}
+
+
+def render_adm(
+    input_path: str,
+    target_layout: str,
+    output_path: Optional[str] = None,
+) -> str:
+    """
+    渲染 ADM 文件到指定声道布局
+
+    Args:
+        input_path: ADM/BW64 文件路径
+        target_layout: 友好名称，如 "5.1.4 (10ch)"
+        output_path: 输出 WAV 路径，None 则创建临时文件
+
+    Returns:
+        输出 WAV 文件路径
+
+    Raises:
+        ValueError: 不支持的目标布局
+        Exception: 渲染过程中出错（文件不是有效 ADM、解码失败等）
+    """
+    ear_system = LAYOUT_MAP.get(target_layout)
+    if not ear_system:
+        raise ValueError(
+            f"不支持的目标布局: {target_layout}。支持: {list(LAYOUT_MAP.keys())}"
+        )
+
+    if output_path is None:
+        output_path = str(
+            Path(tempfile.gettempdir()) / f"{Path(input_path).stem}_rndrd.wav"
+        )
+
+    driver = OfflineRenderDriver(
+        target_layout=ear_system,
+        speakers_file=None,
+        output_gain_db=0,
+        fail_on_overload=False,
+        enable_block_duration_fix=True,
+    )
+
+    # 策略 B：先尝试原始文件；若因 audioStreamFormat 双重引用失败，自动修复并重试
+    try:
+        driver.run(input_path, output_path)
+        return output_path
+    except Exception as first_err:
+        err_msg = str(first_err)
+        if "has a reference to both" in err_msg:
+            fixed_path = _create_fixed_bw64(input_path)
+            try:
+                driver.run(fixed_path, output_path)
+                return output_path
+            finally:
+                try:
+                    import os
+                    os.remove(fixed_path)
+                except Exception:
+                    pass
+        else:
+            raise
+
+
+def render_adm_with_progress(
+    input_path: str,
+    target_layout: str,
+    output_path: Optional[str] = None,
+    progress_callback=None,
+) -> str:
+    """
+    渲染 ADM 文件到指定声道布局，支持进度回调。
+
+    Args:
+        input_path: ADM/BW64 文件路径
+        target_layout: 友好名称，如 "5.1.4 (10ch)"
+        output_path: 输出 WAV 路径，None 则创建临时文件
+        progress_callback: 进度回调函数，接收 0-100 的整数
+
+    Returns:
+        输出 WAV 文件路径
+
+    Raises:
+        ValueError: 不支持的目标布局
+        Exception: 渲染过程中出错
+    """
+    import soundfile as sf
+
+    ear_system = LAYOUT_MAP.get(target_layout)
+    if not ear_system:
+        raise ValueError(
+            f"不支持的目标布局: {target_layout}。支持: {list(LAYOUT_MAP.keys())}"
+        )
+
+    if output_path is None:
+        output_path = str(
+            Path(tempfile.gettempdir()) / f"{Path(input_path).stem}_rndrd.wav"
+        )
+
+    driver = OfflineRenderDriver(
+        target_layout=ear_system,
+        speakers_file=None,
+        output_gain_db=0,
+        fail_on_overload=False,
+        enable_block_duration_fix=True,
+    )
+
+    def _do_render(src_path: str, dst_path: str, total_samples: int) -> None:
+        spkr_layout, upmix, n_channels = driver.load_output_layout()
+        output_monitor = PeakMonitor(n_channels)
+
+        with openBw64Adm(src_path) as infile:
+            infile.adm.validate()
+            timing_fixes.check_blockFormat_timings(
+                infile.adm, fix=driver.enable_block_duration_fix
+            )
+
+            samples_written = 0
+            last_percent = -1
+
+            format_info = FormatInfoChunk(
+                formatTag=1,
+                channelCount=n_channels,
+                sampleRate=infile.sampleRate,
+                bitsPerSample=infile.bitdepth,
+            )
+            with openBw64(dst_path, "w", formatInfo=format_info) as outfile:
+                for output_block in driver.render_input_file(
+                    infile, spkr_layout, upmix
+                ):
+                    output_monitor.process(output_block)
+                    outfile.write(output_block)
+
+                    if progress_callback and total_samples > 0:
+                        samples_written += output_block.shape[0]
+                        percent = min(100, int(samples_written / total_samples * 100))
+                        if percent != last_percent:
+                            progress_callback(percent)
+                            last_percent = percent
+
+        output_monitor.warn_overloaded()
+        if driver.fail_on_overload and output_monitor.has_overloaded():
+            raise RuntimeError("输出过载：渲染后的音频出现了削波，请降低增益或检查输入电平。")
+
+    # 用 soundfile 预先获取总样本数（Bw64AdmReader 没有 duration 属性）
+    info = sf.info(input_path)
+    total_samples = info.frames
+
+    # 策略 B：先尝试原始文件；若因 audioStreamFormat 双重引用失败，自动修复并重试
+    try:
+        _do_render(input_path, output_path, total_samples)
+        return output_path
+    except Exception as first_err:
+        err_msg = str(first_err)
+        if "has a reference to both" in err_msg:
+            fixed_path = _create_fixed_bw64(input_path)
+            try:
+                _do_render(fixed_path, output_path, total_samples)
+                return output_path
+            finally:
+                try:
+                    import os
+                    os.remove(fixed_path)
+                except Exception:
+                    pass
+        else:
+            raise

@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-ImmersiveLoudness 构建脚本 v1.0 (build 260526)
-更新：支持 EAR 渲染器、ADM 渲染进度条、mono_channel_matcher、renderers 模块
-修复：scipy/numpy 依赖 unittest 的问题
+ImmersiveLoudness Simple 构建脚本 v1.0 (build 260511)
+简化版：去掉 ADM/EAR 渲染功能，仅保留多声道响度测量
 """
 
 import os
@@ -64,7 +63,7 @@ def check_dependencies():
         'numpy': 'numpy',
         'scipy': 'scipy',
         'openpyxl': 'openpyxl',
-        'ebu-adm-renderer': 'ear',
+
     }
     
     print("=" * 60)
@@ -87,11 +86,9 @@ def check_dependencies():
 def create_spec_file(project_dir, src_dir, icon_path, output_dir):
     """创建 .spec 文件"""
     
-    adm_parser = str(src_dir / 'adm_parser.py').replace('\\', '/')
     itu1770 = str(src_dir / 'itu1770_meter.py').replace('\\', '/')
     report_exporter = str(src_dir / 'report_exporter.py').replace('\\', '/')
     mono_matcher = str(src_dir / 'mono_channel_matcher.py').replace('\\', '/')
-    renderers_dir = str(src_dir / 'renderers').replace('\\', '/')
     main_script = str(src_dir / 'main_gui.py').replace('\\', '/')
     hooks_dir = str(project_dir / 'pyinstaller_hooks').replace('\\', '/')
     assets_dir = str(project_dir / 'assets').replace('\\', '/')
@@ -99,16 +96,7 @@ def create_spec_file(project_dir, src_dir, icon_path, output_dir):
     
     icon_str = f"icon='{icon_path.replace(chr(92), '/')}'," if icon_path else ""
     
-    # EAR 数据文件路径
-    try:
-        import ear
-        ear_pkg_dir = Path(ear.__file__).parent
-        ear_core_data = str(ear_pkg_dir / 'core' / 'data').replace('\\', '/')
-        ear_adm_data = str(ear_pkg_dir / 'fileio' / 'adm' / 'data').replace('\\', '/')
-        ear_datas = f"""('{ear_core_data}', 'ear/core/data'),
-        ('{ear_adm_data}', 'ear/fileio/adm/data'),"""
-    except Exception:
-        ear_datas = ""
+    ear_datas = ""
     
     # 关键修复：包含 unittest（scipy/numpy 需要）
     spec_content = f'''# -*- mode: python ; coding: utf-8 -*-
@@ -121,11 +109,9 @@ a = Analysis(
     pathex=['{str(project_dir).replace(chr(92), '/')}', '{str(src_dir).replace(chr(92), '/')}'],
     binaries=[],
     datas=[
-        ('{adm_parser}', '.'),
         ('{itu1770}', '.'),
         ('{report_exporter}', '.'),
         ('{mono_matcher}', '.'),
-        ('{renderers_dir}', 'renderers'),
         ('{assets_dir}', 'assets'),
         ('{i18n_dir}', 'i18n'),
         {ear_datas}
@@ -151,20 +137,6 @@ a = Analysis(
         'openpyxl',
         'openpyxl.styles',
         'openpyxl.utils',
-        # renderers / EAR
-        'renderers',
-        'renderers.ear_renderer',
-        'ear.cmdline.render_file',
-        'ear.core.bs2051',
-        'ear.core.allocentric',
-        'ear.core.hoa',
-        'ear.core.direct_speakers',
-        'ear.core.objectbased',
-        'ear.core.metadata_input',
-        'ear.fileio',
-        'ear.fileio.bw64',
-        'ear.fileio.adm',
-        'ear.fileio.adm.xml',
         # 其他
         'dataclasses',
         'xml.etree.ElementTree',
@@ -237,7 +209,7 @@ def build_executable():
     print()
     
     project_dir = Path(__file__).parent.absolute()
-    src_dir = project_dir / 'src'
+    src_dir = project_dir / 'src_simple'
     
     main_script = src_dir / 'main_gui.py'
     if not main_script.exists():
@@ -357,7 +329,7 @@ pause
 def main():
     print()
     print("=" * 60)
-    print("ImmersiveLoudness 构建程序 v1.0 (build 260526)")
+    print("ImmersiveLoudness Simple 构建程序 v1.0 (build 260511)")
     print("=" * 60)
     print()
     print("此脚本将:")
@@ -366,6 +338,8 @@ def main():
     print("  3. 生成 .spec 文件（修复 scipy/numpy unittest 依赖）")
     print("  4. 使用 PyInstaller 打包成单个 EXE")
     print("  5. 创建可选的安装脚本")
+    print()
+    print("注意：此为简化版，不含 ADM/EAR 渲染功能")
     print()
     
     if sys.version_info < (3, 8):

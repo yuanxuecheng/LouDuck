@@ -93,9 +93,9 @@ class ReportExporter:
             "-" * 60,
             QCoreApplication.translate("ReportExporter", "测量结果:"),
             "-" * 60,
-            QCoreApplication.translate("ReportExporter", "  节目响度:      {val:+.2f} LUFS").format(val=self.results.integrated),
-            QCoreApplication.translate("ReportExporter", "  最大短时响度:  {val:+.2f} LUFS").format(val=self.results.short_term),
-            QCoreApplication.translate("ReportExporter", "  最大瞬时响度:  {val:+.2f} LUFS").format(val=self.results.momentary),
+            QCoreApplication.translate("ReportExporter", "  节目响度:      {val:+.2f} LKFS").format(val=self.results.integrated),
+            QCoreApplication.translate("ReportExporter", "  最大短时响度:  {val:+.2f} LKFS").format(val=self.results.short_term),
+            QCoreApplication.translate("ReportExporter", "  最大瞬时响度:  {val:+.2f} LKFS").format(val=self.results.momentary),
             QCoreApplication.translate("ReportExporter", "  最大真峰值:    {val:+.2f} dBTP").format(val=self.results.true_peak),
             QCoreApplication.translate("ReportExporter", "  响度范围:      {val:.2f} LU").format(val=self.results.lra),
             "",
@@ -171,10 +171,10 @@ class ReportExporter:
             writer.writerow(["Metric", "Value", "Unit", "Target", "Status"])
             
             rows = [
-                [QCoreApplication.translate("ReportExporter", "节目响度"), f"{self.results.integrated:.4f}", "LUFS", "-23.0", 
+                [QCoreApplication.translate("ReportExporter", "节目响度"), f"{self.results.integrated:.4f}", "LKFS", "-23.0", 
                  "Pass" if abs(self.results.integrated - (-23)) <= 1.0 else "Fail"],
-                [QCoreApplication.translate("ReportExporter", "最大短时响度"), f"{self.results.short_term:.4f}", "LUFS", "-23.0", "-"],
-                [QCoreApplication.translate("ReportExporter", "最大瞬时响度"), f"{self.results.momentary:.4f}", "LUFS", "-", "-"],
+                [QCoreApplication.translate("ReportExporter", "最大短时响度"), f"{self.results.short_term:.4f}", "LKFS", "-23.0", "-"],
+                [QCoreApplication.translate("ReportExporter", "最大瞬时响度"), f"{self.results.momentary:.4f}", "LKFS", "-", "-"],
                 [QCoreApplication.translate("ReportExporter", "最大真峰值"), f"{self.results.true_peak:.4f}", "dBTP", "-1.0",
                  "Pass" if self.results.true_peak <= -1.0 else "Fail"],
                 [QCoreApplication.translate("ReportExporter", "响度范围"), f"{self.results.lra:.4f}", "LU", "-", "-"],

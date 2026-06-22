@@ -865,8 +865,25 @@ class BW64Parser:
             'bits': bits_per_sample
         }
     
+    def iter_audio_blocks(self, block_samples: int = 48000, dtype: str = 'float32'):
+        """
+        流式分块读取音频数据。
+
+        Args:
+            block_samples: 每块采样数（按文件原始采样率）
+            dtype: 读取数据类型
+
+        Yields:
+            (chunk, sample_rate): chunk 形状为 (samples, channels) 或 (samples,)
+        """
+        import soundfile as sf
+        with sf.SoundFile(str(self.file_path), 'r') as f:
+            sr = f.samplerate
+            for chunk in f.blocks(blocksize=block_samples, dtype=dtype, always_2d=True):
+                yield chunk, sr
+
     def read_audio(self):
-        """读取音频数据"""
+        """读取音频数据（一次性加载，小文件兼容接口）"""
         import soundfile as sf
         data, sr = sf.read(str(self.file_path), dtype='float32')
         return data, sr

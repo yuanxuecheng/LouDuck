@@ -1,10 +1,10 @@
-# ImmersiveLoudness 项目指南
+# LouDuck 项目指南
 
 > 本文件面向 AI 编码助手。阅读者被假设对项目一无所知。
 
 ## 项目概述
 
-**ImmersiveLoudness**（沉浸式音频文件响度测量工具，简称 IAFLM）是一个基于 ITU-R BS.1770-5 标准的响度测量桌面应用程序，当前版本 v3.1。
+**LouDuck**（沉浸式音频文件响度测量工具，简称 IAFLM）是一个基于 ITU-R BS.1770-5 标准的响度测量桌面应用程序，当前版本 v3.1。
 
 核心功能：
 - 支持标准多声道音频文件（WAV/FLAC/MP3/OGG）的响度测量
@@ -27,7 +27,7 @@
 ## 项目结构
 
 ```
-ImmersiveLoudness/
+LouDuck/
 ├── src/                          # 核心源代码（所有业务逻辑在此）
 │   ├── main_gui.py               # GUI 主程序（QMainWindow + QThread 工作线程）
 │   ├── itu1770_meter.py          # ITU-R BS.1770-5 响度测量核心算法
@@ -38,9 +38,9 @@ ImmersiveLoudness/
 ├── pyinstaller_hooks/
 │   └── hook-immersive_loudness.py # PyInstaller 隐藏导入配置
 ├── build/
-│   └── ImmersiveLoudness.spec    # PyInstaller spec 文件（已生成）
+│   └── LouDuck.spec    # PyInstaller spec 文件（已生成）
 ├── dist/
-│   └── ImmersiveLoudness.exe     # 构建产物（Windows 可执行文件）
+│   └── LouDuck.exe     # 构建产物（Windows 可执行文件）
 ├── backups/                      # 自动备份存放目录（zip 格式）
 ├── exports/                      # 报告导出默认目录（运行时创建）
 ├── venv/                         # Python 虚拟环境
@@ -55,26 +55,34 @@ ImmersiveLoudness/
 
 ## 模块职责
 
-### `src/main_gui.py`（2109 行）
+### `src/main_gui.py`
 - 程序入口点（`if __name__ == "__main__": main()`）
 - `LoudnessMeterApp`：主窗口，三栏布局（左：输入/配置，中：标准与进度，右：结果与导出）
 - `DetailedMeasurementWorker`（QThread）：后台测量线程，避免 GUI 卡顿
+  - 三种输入模式（标准文件 / ADM / 多单声道）均使用流式读取，不再一次性加载完整音频数组
+  - 通过 `ITU1770Meter.feed()` 分块喂入音频，`finalize()` 获取结果
 - `SmartMultiMonoDialog`（QDialog）：多单声道文件智能声道匹配对话框
   - 支持点号分隔声道标识（如 `2005.L.wav`）
   - 支持 iXML 元数据读取
   - 支持正则匹配自动分配声道
 - `_export_excel_detailed`：使用 openpyxl 生成带条件格式的 Excel 报告
 
-### `src/itu1770_meter.py`（318 行）
-- `ITU1770Meter`：响度测量引擎
+### `src/itu1770_meter.py`
+- `ITU1770Meter`：响度测量引擎（真流式/状态机实现）
+  - 公开流式接口：`reset()`、`feed(chunk)`、`finalize()`
+  - 保留兼容接口：`process_audio(audio, ...)`，内部走流式核心
+  - 内部维护 K-加权 IIR 状态、100ms 功率累积器、400ms 块响度序列、3s 短时响度环形缓冲区、真峰值 FIR 尾部历史
+  - 内存占用与文件大小无关，仅取决于 chunk 大小与状态缓冲区
 - 实现 K-加权两段滤波（Stage1/Stage2 系数，48kHz 标准）
-- 真峰值测量（48 阶 FIR 4x 过采样）
-- 双门控集成响度（绝对门限 -70 LUFS，相对门限 -10 LU）
+- 真峰值测量（48 阶 FIR 4x 过采样，跨块保留 overlap 避免边界峰值丢失）
+- 双门控集成响度（绝对门限 -70 LKFS，相对门限 -10 LU）
 - 短时响度（3 秒滑动窗口）、瞬时响度（400ms）、LRA（10%-95% 百分位）
 - 支持声道权重（ITU-R BS.1770-5 Table 4，侧/后环绕 +1.5dB）
 
-### `src/adm_parser.py`（875 行）
+### `src/adm_parser.py`
 - `BW64Parser`：BW64/RIFF 文件解析，提取 axml/chna/fmt/data chunk
+  - 新增 `iter_audio_blocks(block_samples, dtype)`：流式分块读取音频，供 `main_gui.py` 避免一次性全量加载
+  - 保留 `read_audio()`：小文件兼容接口
 - `ADM`：ADM XML 解析器（动态命名空间检测）
 - 空间特征规则引擎：基于声道名称/方位角/仰角自动识别配置（stereo/5.1/7.1/5.1.4/7.1.4/7.1.2）
 - 渲染器与创作软件信息提取（ITU-R BS.2076-3 §5.8.6）
@@ -107,10 +115,10 @@ python main_gui.py
 python build_20260420.py
 
 # 方法2：直接使用已有的 spec 文件
-pyinstaller build\ImmersiveLoudness.spec --distpath dist --workpath build --noconfirm
+pyinstaller build\LouDuck.spec --distpath dist --workpath build --noconfirm
 ```
 
-构建产物位于 `dist/ImmersiveLoudness.exe`。
+构建产物位于 `dist/LouDuck.exe`。
 
 **注意**：`build_20260420.py` 会自动处理以下 PyInstaller 常见问题：
 - 包含 `unittest` 和 `unittest.mock`（SciPy/NumPy 内部依赖）
@@ -120,8 +128,8 @@ pyinstaller build\ImmersiveLoudness.spec --distpath dist --workpath build --noco
 
 ### 安装到系统
 
-将 `install.bat` 与 `dist/ImmersiveLoudness.exe` 放在同一目录，以管理员身份运行 `install.bat`：
-- 复制 EXE 到 `%ProgramFiles%\ImmersiveLoudness`
+将 `install.bat` 与 `dist/LouDuck.exe` 放在同一目录，以管理员身份运行 `install.bat`：
+- 复制 EXE 到 `%ProgramFiles%\LouDuck`
 - 创建桌面快捷方式
 - 创建开始菜单快捷方式
 
@@ -167,8 +175,14 @@ python backup.py "修改描述"
 1. **线程安全**：所有耗时操作（音频加载、响度计算）必须在 `QThread` 中进行，禁止在 GUI 线程执行重型 NumPy/SciPy 运算
 2. **进度报告**：长任务应通过 `sub_step.emit(描述, 百分比)` 向 GUI 报告进度
 3. **openpyxl 延迟导入**：Excel 导出功能使用 `try/except ImportError` 延迟导入 openpyxl，确保未安装时程序仍能运行（仅该功能不可用）
-4. **soundfile 兼容性**：大文件（>50MB）使用分块流式读取，避免内存溢出
-5. **ADM 命名空间**：ADM XML 可能使用不同命名空间，解析代码使用动态检测，修改时勿硬编码命名空间 URI
+4. **真流式响度核心**：`itu1770_meter.py` 已改造为状态机。修改算法时注意：
+   - K-加权滤波状态（`lfilter_zi` 或 0 初始）必须跨 chunk 保持连续；
+   - 真峰值 FIR 必须保留尾部历史并处理 chunk 边界 overlap；
+   - Momentary / Short-term / Integrated 的窗口统计基于 100ms / 400ms / 3s 累积器，不保存完整音频；
+   - LRA 使用的 1s 步进 Short-term 在 `finalize()` 中统一计算。
+5. **流式文件 I/O**：`main_gui.py` 和 `adm_parser.py` 不再预分配 `(total_samples, channels)` 数组。所有输入模式均通过 `soundfile.blocks()` 或 `sf.SoundFile.read()` 分块读取，每次只保留当前 chunk。
+6. **ADM 命名空间**：ADM XML 可能使用不同命名空间，解析代码使用动态检测，修改时勿硬编码命名空间 URI
+7. **实时插件复用**：流式核心 `ITU1770Meter.feed()` 可直接用于未来实时插件/响度表。新增实时接口时应保持 `feed()` 的签名与语义不变。
 
 ## 安全与部署考虑
 

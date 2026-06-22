@@ -1,5 +1,5 @@
 """
-ITU-R BS.1770-5 响度测量核心算法（严格遵循标准重写版）
+ITU-R BS.1770-5 响度测量核心算法（真流式/状态机版）
 
 算法依据：
 - ITU-R BS.1770-5 (2023) — 集成响度、真峰值、声道加权
@@ -7,19 +7,31 @@ ITU-R BS.1770-5 响度测量核心算法（严格遵循标准重写版）
 - EBU Tech 3342 (2016) — 响度范围 LRA
 
 关键标准要点：
-1. K-加权滤波：整段连续应用两段级联 IIR（Stage1 高通 + Stage2 高频 shelf），
+1. K-加权滤波：两段级联 IIR（Stage1 高通 + Stage2 高频 shelf），
    仅使用 48kHz 标准系数（Table 1/2）。非 48kHz 输入先重采样。
 2. 集成响度：
    - 400ms 不重叠 gating blocks（48kHz 下每块 19200 采样）。
    - 每块加权功率 z_i = Σ G_j · mean_sq_j。
    - 块响度 l_i = -0.691 + 10·log10(z_i)。
-   - 绝对门限：-70.0 LUFS（功率域等效门限 10^(-6.9309)）。
+   - 绝对门限：-70.0 LKFS（功率域等效门限 10^(-6.9309)）。
    - 相对门限：通过绝对门限的块的平均功率 × 0.1（即平均响度 -10 LU 的功率等效）。
    - 集成响度 = 通过双门限的所有块的平均 z 转 dB（公式 2）。
-3. 真峰值：原始音频整段 4x 过采样 FIR（48 阶 4 相，Annex 2），避免分块边界失真。
+3. 真峰值：原始音频 4x 过采样 FIR（48 阶 4 相，Annex 2）。
+   流式处理时保存 FIR 尾部历史，保证跨块边界峰值不丢失。
 4. Momentary：400ms 滑动窗口，100ms 步进（EBU Tech 3341）。
 5. Short-term：3s 滑动窗口，100ms 步进（EBU Tech 3341）。
-6. LRA：基于 Short-term 序列，双门限后取 10%~95% 分位差（EBU Tech 3342）。
+6. LRA：基于 3s 窗口、1s 步进的 Short-term 序列，双门限后取 10%~95% 分位差（EBU Tech 3342）。
+
+流式接口：
+    meter = ITU1770Meter(config, sr)
+    meter.reset(sr)
+    for chunk in audio_chunks:
+        meter.feed(chunk)
+    result = meter.finalize()
+
+兼容性接口：
+    result = meter.process_audio(audio, sr, progress_callback)
+    内部已被实现为流式接口的薄封装，结果字段与旧版完全一致。
 
 进度回调：
     progress_callback(step_name: str, overall_progress_pct: float)
@@ -31,6 +43,7 @@ import numpy as np
 from scipy import signal
 from dataclasses import dataclass
 from typing import List, Optional, Callable
+from collections import deque
 
 
 @dataclass
@@ -60,7 +73,7 @@ class ChannelConfig:
 
 
 class ITU1770Meter:
-    """ITU-R BS.1770-5 响度计"""
+    """ITU-R BS.1770-5 响度计（真流式/状态机实现）"""
 
     # 48kHz K-加权滤波器系数（Table 1 / Table 2）
     STAGE1_B = [1.53512485958697, -2.69169618940638, 1.19839281085285]
@@ -128,6 +141,7 @@ class ITU1770Meter:
         self.channel_config = channel_config
         self.sample_rate = sample_rate
         self.weights = [ch.get_weight() for ch in channel_config]
+        self._reset_state()
 
     @classmethod
     def auto_config(cls, num_channels: int) -> List[ChannelConfig]:
@@ -135,6 +149,49 @@ class ITU1770Meter:
         mapping = {2: 'stereo', 6: '5.1', 8: '7.1', 10: '5.1.4', 12: '7.1.4'}
         config_name = mapping.get(num_channels, 'stereo')
         return cls.CONFIGS.get(config_name, cls.CONFIGS['stereo'])
+
+    # ------------------------------------------------------------------ #
+    # 状态管理
+    # ------------------------------------------------------------------ #
+
+    def _reset_state(self):
+        """重置所有流式状态"""
+        num_channels = len(self.channel_config)
+
+        # K-加权滤波器状态（每声道独立，初始为 0，与整段 lfilter 默认行为一致）
+        self._zi_stage1 = [np.zeros(max(len(self.STAGE1_A), len(self.STAGE1_B)) - 1,
+                                    dtype=np.float64) for _ in range(num_channels)]
+        self._zi_stage2 = [np.zeros(max(len(self.STAGE2_A), len(self.STAGE2_B)) - 1,
+                                    dtype=np.float64) for _ in range(num_channels)]
+
+        # 100ms 功率累积器
+        self._power_buffer = 0.0
+        self._power_buffer_samples = 0
+
+        # 100ms 块功率序列（用于 Momentary / Short-term）
+        self._z_100ms_window = deque()
+
+        # 400ms 块统计（用于 Integrated）
+        self._z_values = []          # 线性功率
+        self._blocks_loudness = []   # LKFS
+
+        # Momentary / Short-term
+        self._momentary_values = []
+        self._short_term_values_100ms = []
+        self._short_term_values_1s = []
+
+        # 真峰值
+        self._max_tp_linear = 0.0
+        self._tp_tail_raw = [np.array([], dtype=np.float64) for _ in range(num_channels)]
+
+        # 采样率与计数
+        self._input_sr = self.sample_rate
+        self._processed_samples_48k = 0
+
+    def reset(self, sample_rate: int = 48000):
+        """公开接口：重置测量器，准备处理新文件"""
+        self._input_sr = sample_rate
+        self._reset_state()
 
     # ------------------------------------------------------------------ #
     # 内部工具方法
@@ -146,223 +203,199 @@ class ITU1770Meter:
         if callback is not None:
             callback(step, float(pct))
 
-    def _resample_to_48k(self, audio: np.ndarray, sr: int,
-                         callback: Optional[Callable] = None) -> np.ndarray:
-        """重采样到 48kHz，分块处理以支持进度报告"""
+    @staticmethod
+    def _to_db(power: float) -> float:
+        """功率转 LKFS"""
+        if power > 0.0:
+            return -0.691 + 10.0 * np.log10(power)
+        return -np.inf
+
+    def _resample_chunk(self, chunk: np.ndarray, sr: int) -> np.ndarray:
+        """将单块音频重采样到 48kHz（resample_poly 是 LTI，可分块无状态处理）"""
         if sr == 48000:
-            return audio
+            return chunk
 
         target_sr = 48000
         g = int(np.gcd(sr, target_sr))
         up = target_sr // g
         down = sr // g
+        return signal.resample_poly(chunk, up, down, axis=0)
 
-        # 每块处理约 1 秒原始音频，避免内存暴涨
-        chunk_samples = sr
-        num_chunks = max(1, (len(audio) + chunk_samples - 1) // chunk_samples)
-        resampled_chunks = []
+    def _k_weight_feed(self, chunk: np.ndarray) -> np.ndarray:
+        """K-加权滤波（流式，状态保持）"""
+        num_channels = chunk.shape[1]
+        filtered = np.empty_like(chunk, dtype=np.float64)
 
-        for i in range(num_chunks):
-            start = i * chunk_samples
-            end = min(start + chunk_samples, len(audio))
-            chunk = audio[start:end]
-            resampled = signal.resample_poly(chunk, up, down, axis=0)
-            resampled_chunks.append(resampled)
+        for ch in range(num_channels):
+            x = chunk[:, ch].astype(np.float64)
+            y1, zf1 = signal.lfilter(
+                self.STAGE1_B, self.STAGE1_A, x, zi=self._zi_stage1[ch]
+            )
+            self._zi_stage1[ch] = zf1
 
-            pct = (i + 1) / num_chunks * 15.0
-            self._cb(callback, "重采样到 48kHz", pct)
+            y2, zf2 = signal.lfilter(
+                self.STAGE2_B, self.STAGE2_A, y1, zi=self._zi_stage2[ch]
+            )
+            self._zi_stage2[ch] = zf2
 
-        return np.concatenate(resampled_chunks, axis=0)
+            filtered[:, ch] = y2
 
-    def _k_weight(self, audio: np.ndarray) -> np.ndarray:
-        """K-加权滤波（整段连续，避免分块状态重置）"""
-        y1 = signal.lfilter(self.STAGE1_B, self.STAGE1_A, audio, axis=0)
-        y2 = signal.lfilter(self.STAGE2_B, self.STAGE2_A, y1, axis=0)
-        return y2
+        return filtered
 
-    def _true_peak(self, audio: np.ndarray,
-                   callback: Optional[Callable] = None) -> float:
-        """真峰值测量（整段原始音频，4x 过采样 FIR）"""
-        max_tp = 0.0
-        num_ch = audio.shape[1]
-        for ch in range(num_ch):
-            x = audio[:, ch].astype(np.float64)
-            x_up = np.zeros(len(x) * 4, dtype=np.float64)
-            x_up[::4] = x
-            y = signal.lfilter(self.TP_FIR, [1.0], x_up)
-            tp = np.max(np.abs(y))
-            if tp > max_tp:
-                max_tp = tp
-            pct = 20.0 + (ch + 1) / num_ch * 5.0
-            self._cb(callback, "计算真峰值", pct)
-        if max_tp > 0.0:
-            return 20.0 * np.log10(max_tp)
-        return -np.inf
+    def _weighted_power_per_sample(self, filtered: np.ndarray) -> np.ndarray:
+        """计算每个采样点的加权功率（跨声道求和，跳过 LFE）"""
+        n_samples = filtered.shape[0]
+        power = np.zeros(n_samples, dtype=np.float64)
+        num_channels = min(filtered.shape[1], len(self.channel_config))
 
-    def _weighted_power(self, block: np.ndarray) -> float:
-        """
-        计算单一块的加权功率 z = Σ G_j · mean_sq_j
-        block: (samples, channels)
-        """
-        weighted_sum = 0.0
-        for j, ch_cfg in enumerate(self.channel_config):
-            if ch_cfg.is_lfe or j >= block.shape[1]:
+        for j in range(num_channels):
+            ch_cfg = self.channel_config[j]
+            if ch_cfg.is_lfe:
                 continue
             w = self.weights[j]
             if w > 0.0:
-                # 使用 float64 避免精度问题
-                mean_sq = np.mean(block[:, j].astype(np.float64) ** 2)
-                weighted_sum += w * mean_sq
-        return weighted_sum
+                power += w * (filtered[:, j].astype(np.float64) ** 2)
 
-    def _integrated_loudness(self, filtered: np.ndarray,
-                             callback: Optional[Callable] = None):
-        """
-        集成响度（ITU-R BS.1770-5 公式 1 / 2）
-        返回: (integrated_lufs, blocks_loudness_list)
-        """
+        return power
+
+    def _on_100ms_block(self, z: float):
+        """每生成一个 100ms 块时调用，更新所有依赖统计量"""
+        self._z_100ms_window.append(z)
+        idx = len(self._z_100ms_window) - 1
+
+        # Momentary: 400ms 滑动窗口，100ms 步进
+        if idx >= 3:
+            window = list(self._z_100ms_window)[-4:]
+            mean_z = np.mean(window)
+            self._momentary_values.append(self._to_db(mean_z))
+
+        # Short-term (EBU Tech 3341): 3s 滑动窗口，100ms 步进
+        if idx >= 29:
+            window = list(self._z_100ms_window)[-30:]
+            mean_z = np.mean(window)
+            self._short_term_values_100ms.append(self._to_db(mean_z))
+
+        # 注意：1s 步进的 Short-term（用于 LRA）需要在所有 100ms 块都产生后，
+        # 在 finalize() 中统一计算，因为以当前块为起始的 3s 窗口需要未来的块。
+
+    def _accumulate_power(self, filtered: np.ndarray):
+        """累积 100ms 功率块，并生成 400ms 集成响度块"""
         sr = 48000
-        block_samples = int(0.4 * sr)          # 400ms = 19200 samples
-        num_samples = len(filtered)
-        num_blocks = num_samples // block_samples
+        win_100ms = int(0.1 * sr)  # 4800 samples
 
-        if num_blocks == 0:
-            return -np.inf, []
+        if win_100ms <= 0:
+            return
 
-        z_values = []          # 每块的加权功率（线性）
-        blocks_loudness = []   # 每块的响度 l_i（LUFS），用于 GUI 曲线
+        power = self._weighted_power_per_sample(filtered)
+        n_samples = len(power)
+        pos = 0
 
-        report_interval = max(1, num_blocks // 20)
+        while pos < n_samples:
+            need = win_100ms - self._power_buffer_samples
+            available = n_samples - pos
 
-        for i in range(num_blocks):
-            start = i * block_samples
-            end = start + block_samples
-            block = filtered[start:end]
+            if available >= need:
+                # 可以完成一个 100ms 块
+                self._power_buffer += np.sum(power[pos:pos + need])
+                z_100ms = self._power_buffer / win_100ms
 
-            z = self._weighted_power(block)
-            z_values.append(z)
+                self._on_100ms_block(z_100ms)
 
-            if z > 0.0:
-                l = -0.691 + 10.0 * np.log10(z)
+                # 检查是否凑齐 4 个 100ms 块（一个不重叠 400ms 块）
+                if len(self._z_100ms_window) % 4 == 0:
+                    block_idx = len(self._z_100ms_window) - 4
+                    block_window = list(self._z_100ms_window)[block_idx:block_idx + 4]
+                    z_block = np.mean(block_window)
+                    self._z_values.append(z_block)
+                    self._blocks_loudness.append(self._to_db(z_block))
+
+                # 重置缓冲
+                self._power_buffer = 0.0
+                self._power_buffer_samples = 0
+                pos += need
             else:
-                l = -np.inf
-            blocks_loudness.append(l)
+                # 不足以完成一个 100ms 块，累积到缓冲
+                self._power_buffer += np.sum(power[pos:])
+                self._power_buffer_samples += available
+                pos = n_samples
 
-            if callback and (i + 1) % report_interval == 0:
-                pct = 25.0 + (i + 1) / num_blocks * 25.0  # 集成响度占 25~50%
-                self._cb(callback, "计算集成响度", pct)
+    def _true_peak_feed(self, chunk: np.ndarray):
+        """真峰值流式测量（4x 过采样 FIR，保存尾部历史）"""
+        num_channels = chunk.shape[1]
+        fir_len = len(self.TP_FIR)
+        tail_len = fir_len - 1  # 48 -> 47
 
-        z_arr = np.array(z_values, dtype=np.float64)
+        for ch in range(num_channels):
+            x = chunk[:, ch].astype(np.float64)
+            tail = self._tp_tail_raw[ch]
 
-        # Step 2: 绝对门限 -70.0 LUFS（转成功率域比较，避免数值抖动）
+            if len(tail) > 0:
+                x_concat = np.concatenate([tail, x])
+            else:
+                x_concat = x
+
+            # 4x 上采样
+            x_up = np.zeros(len(x_concat) * 4, dtype=np.float64)
+            x_up[::4] = x_concat
+
+            # FIR 滤波
+            y = signal.lfilter(self.TP_FIR, [1.0], x_up)
+
+            # 有效输出区段：跳过上一块 tail 对应的输出，只取当前 chunk 的 4x 样点
+            valid_start = len(tail) * 4
+            valid_end = valid_start + len(x) * 4
+            valid_y = y[valid_start:valid_end]
+
+            if len(valid_y) > 0:
+                tp = np.max(np.abs(valid_y))
+                if tp > self._max_tp_linear:
+                    self._max_tp_linear = tp
+
+            # 保存当前块尾部原始采样供下一块使用
+            new_tail_len = min(tail_len, len(x))
+            if new_tail_len > 0:
+                self._tp_tail_raw[ch] = x[-new_tail_len:].copy()
+            else:
+                self._tp_tail_raw[ch] = np.array([], dtype=np.float64)
+
+    def _compute_short_term_1s(self):
+        """在所有 100ms 块累积完成后，计算 3s 窗口、1s 步进的 Short-term（用于 LRA）"""
+        s_win = 30
+        z_list = list(self._z_100ms_window)
+        self._short_term_values_1s = []
+        for i in range(0, len(z_list) - s_win + 1, 10):
+            window = z_list[i:i + s_win]
+            mean_z = np.mean(window)
+            self._short_term_values_1s.append(self._to_db(mean_z))
+
+    def _integrated_loudness(self) -> Tuple[float, List[float]]:
+        """基于已累积的 400ms 块计算集成响度"""
+        z_arr = np.array(self._z_values, dtype=np.float64)
+
+        if len(z_arr) == 0:
+            return -np.inf, self._blocks_loudness
+
+        # Step 2: 绝对门限 -70.0 LKFS
         abs_threshold_power = 10.0 ** ((-70.0 + 0.691) / 10.0)
         abs_mask = z_arr > abs_threshold_power
 
         if not np.any(abs_mask):
-            return -np.inf, blocks_loudness
+            return -np.inf, self._blocks_loudness
 
         # Step 3: 相对门限 = 通过绝对门限的块的平均响度 - 10 LU
-        # 功率域等效：mean(z_abs) / 10.0
         mean_z_abs = np.mean(z_arr[abs_mask])
         rel_threshold_power = mean_z_abs / 10.0
 
         # Step 4: 双门限筛选
         final_mask = z_arr > rel_threshold_power
         if not np.any(final_mask):
-            return -np.inf, blocks_loudness
+            return -np.inf, self._blocks_loudness
 
         # Step 5: 集成响度 = 通过双门限的块的平均 z 转 dB
         mean_z_final = np.mean(z_arr[final_mask])
         integrated = -0.691 + 10.0 * np.log10(mean_z_final)
 
-        return float(integrated), blocks_loudness
-
-    def _momentary_short_term(self, filtered: np.ndarray,
-                              callback: Optional[Callable] = None):
-        """
-        Momentary / Short-term（EBU Tech 3341 / EBU Tech 3342）
-        返回: (current_momentary, current_short_term,
-               max_momentary, max_short_term,
-               short_term_values_100ms, short_term_values_1s)
-        short_term_values_100ms: 100ms 步进，用于实时显示 / max_short_term
-        short_term_values_1s:    1s 步进，用于 LRA（EBU Tech 3342 §3.1）
-        """
-        sr = 48000
-        win_100ms = int(0.1 * sr)   # 4800 samples
-        num_samples = len(filtered)
-
-        # 计算所有 100ms 窗口的加权功率（步进 100ms，无重叠）
-        num_100ms = max(0, (num_samples - win_100ms) // win_100ms + 1)
-        weighted_powers = []
-
-        report_interval = max(1, num_100ms // 10)
-
-        for i in range(num_100ms):
-            start = i * win_100ms
-            end = start + win_100ms
-            block = filtered[start:end]
-            z = self._weighted_power(block)
-            weighted_powers.append(z)
-
-            if callback and (i + 1) % report_interval == 0:
-                pct = 50.0 + (i + 1) / num_100ms * 30.0  # 占 50~80%
-                self._cb(callback, "计算短时/瞬时响度", pct)
-
-        if not weighted_powers:
-            return -np.inf, -np.inf, -np.inf, -np.inf, [], []
-
-        # Momentary: 400ms 滑动窗口 = 4 个 100ms
-        m_win = 4
-        momentary_values = []
-        for i in range(len(weighted_powers)):
-            start = max(0, i - m_win + 1)
-            window = weighted_powers[start:i + 1]
-            if len(window) < m_win:
-                continue  # 窗口未满，按标准不输出
-            mean_z = np.mean(window)
-            if mean_z > 0.0:
-                m = -0.691 + 10.0 * np.log10(mean_z)
-            else:
-                m = -np.inf
-            momentary_values.append(m)
-
-        # Short-term (EBU Tech 3341): 3s 滑动窗口，100ms 步进
-        # 用于实时显示和 max_short_term
-        s_win = 30
-        short_term_values_100ms = []
-        for i in range(len(weighted_powers)):
-            start = max(0, i - s_win + 1)
-            window = weighted_powers[start:i + 1]
-            if len(window) < s_win:
-                continue
-            mean_z = np.mean(window)
-            if mean_z > 0.0:
-                s = -0.691 + 10.0 * np.log10(mean_z)
-            else:
-                s = -np.inf
-            short_term_values_100ms.append(s)
-
-        # Short-term (EBU Tech 3342): 3s 窗口，1s 步进
-        # LRA 必须使用 1s 步进，否则窗口高度重叠导致动态范围被平滑
-        short_term_values_1s = []
-        step = 10  # 1 秒 = 10 个 100ms
-        for i in range(0, len(weighted_powers) - s_win + 1, step):
-            window = weighted_powers[i:i + s_win]
-            mean_z = np.mean(window)
-            if mean_z > 0.0:
-                s = -0.691 + 10.0 * np.log10(mean_z)
-            else:
-                s = -np.inf
-            short_term_values_1s.append(s)
-
-        max_momentary = max(momentary_values) if momentary_values else -np.inf
-        max_short_term = max(short_term_values_100ms) if short_term_values_100ms else -np.inf
-        current_momentary = momentary_values[-1] if momentary_values else -np.inf
-        current_short_term = short_term_values_100ms[-1] if short_term_values_100ms else -np.inf
-
-        return (current_momentary, current_short_term,
-                max_momentary, max_short_term,
-                short_term_values_100ms, short_term_values_1s)
+        return float(integrated), self._blocks_loudness
 
     @staticmethod
     def _lra(short_term_values: List[float]) -> float:
@@ -372,7 +405,7 @@ class ITU1770Meter:
 
         st_arr = np.array(short_term_values, dtype=np.float64)
 
-        # 第一门限：-70.0 LUFS
+        # 第一门限：-70.0 LKFS
         valid = st_arr[st_arr > -70.0]
         if len(valid) < 2:
             return 0.0
@@ -394,70 +427,79 @@ class ITU1770Meter:
     # 公共接口
     # ------------------------------------------------------------------ #
 
-    def process_audio(self, audio: np.ndarray, sr: Optional[int] = None,
-                      progress_callback: Optional[Callable] = None) -> dict:
+    def feed(self, chunk: np.ndarray,
+             progress_callback: Optional[Callable] = None,
+             overall_progress: Optional[float] = None):
         """
-        处理完整音频并返回测量结果。
+        流式喂入一块音频数据。
 
         Args:
-            audio: 音频数据，shape 为 (samples,) 或 (samples, channels)
-            sr: 原始采样率。若非 48000，会先重采样到 48000。
+            chunk: 音频数据，shape 为 (samples,) 或 (samples, channels)
             progress_callback: 进度回调，签名为 (step_name, overall_progress_pct)
-                               step_name 为当前步骤描述（中文）
-                               overall_progress_pct 为 0.0~100.0 的浮点数
+            overall_progress: 0.0~100.0 之间的浮点数，表示当前 chunk 在整个文件中的进度。
+                              如果不提供，只在回调中报告 "流式处理" 步骤。
+        """
+        if chunk is None or len(chunk) == 0:
+            return
+
+        # 标准化输入维度
+        if chunk.ndim == 1:
+            chunk = chunk.reshape(-1, 1)
+        chunk = np.asarray(chunk, dtype=np.float64)
+
+        actual_sr = self._input_sr
+
+        # 流式化后，单个 chunk 内同时完成重采样/K-加权/真峰值/响度统计，
+        # 不再区分传统“步骤”，只报告统一进度。
+        pct = overall_progress if overall_progress is not None else 0.0
+        self._cb(progress_callback, "流式响度测量", pct)
+
+        # ---- 阶段 1: 重采样到 48kHz ----
+        if actual_sr != 48000:
+            chunk = self._resample_chunk(chunk, actual_sr)
+
+        # ---- 阶段 2: K-加权滤波 ----
+        filtered = self._k_weight_feed(chunk)
+
+        # ---- 阶段 3: 真峰值 ----
+        self._true_peak_feed(chunk)
+
+        # ---- 阶段 4 & 5: 累积功率、集成响度块、Momentary / Short-term ----
+        self._accumulate_power(filtered)
+
+        self._processed_samples_48k += len(filtered)
+
+    def finalize(self, progress_callback: Optional[Callable] = None) -> dict:
+        """
+        结束流式处理，返回完整测量结果。
 
         Returns:
-            dict，包含以下字段（与 main_gui.py 兼容）：
-                integrated: float      # 集成响度 LUFS
-                short_term: float      # 当前/最后短时响度 LUFS
-                momentary: float       # 当前/最后瞬时响度 LUFS
+            dict，字段与 process_audio() 完全一致：
+                integrated: float      # 集成响度 LKFS
+                short_term: float      # 当前/最后短时响度 LKFS
+                momentary: float       # 当前/最后瞬时响度 LKFS
                 true_peak: float       # 最大真峰值 dBTP
                 lra: float             # 响度范围 LU
                 max_short_term: float  # 最大短时响度
                 max_momentary: float   # 最大瞬时响度
-                blocks: List[float]    # 400ms 块响度序列（LUFS）
+                blocks: List[float]    # 400ms 块响度序列（LKFS）
+                short_term_curve: List[float]  # 1s 步进短时响度序列
         """
-        # 标准化输入维度
-        if audio.ndim == 1:
-            audio = audio.reshape(-1, 1)
-        audio = np.asarray(audio, dtype=np.float64)
-
-        actual_sr = sr if sr is not None else self.sample_rate
-
-        # ---- 阶段 1: 重采样到 48kHz ----
-        if actual_sr != 48000:
-            self._cb(progress_callback, "重采样到 48kHz", 0.0)
-            audio = self._resample_to_48k(audio, actual_sr, progress_callback)
-
-        # ---- 阶段 2: K-加权滤波 ----
-        self._cb(progress_callback, "K-加权滤波", 15.0)
-        filtered = self._k_weight(audio)
-        self._cb(progress_callback, "K-加权滤波", 20.0)
-
-        # ---- 阶段 3: 真峰值 ----
-        self._cb(progress_callback, "计算真峰值", 20.0)
-        true_peak_db = self._true_peak(audio, progress_callback)
-
-        # ---- 阶段 4: 集成响度 ----
         self._cb(progress_callback, "计算集成响度", 25.0)
-        integrated, blocks_loudness = self._integrated_loudness(
-            filtered, progress_callback
-        )
+        integrated, blocks_loudness = self._integrated_loudness()
 
-        # ---- 阶段 5: Momentary / Short-term ----
-        self._cb(progress_callback, "计算短时/瞬时响度", 50.0)
-        (current_momentary, current_short_term,
-         max_momentary, max_short_term,
-         short_term_values_100ms, short_term_values_1s) = \
-            self._momentary_short_term(filtered, progress_callback)
-
-        # ---- 阶段 6: LRA ----
         self._cb(progress_callback, "计算响度范围", 80.0)
-        lra = self._lra(short_term_values_1s)
-        self._cb(progress_callback, "计算响度范围", 90.0)
+        self._compute_short_term_1s()
+        lra = self._lra(self._short_term_values_1s)
 
-        # ---- 收尾 ----
         self._cb(progress_callback, "整理结果", 95.0)
+
+        max_momentary = max(self._momentary_values) if self._momentary_values else -np.inf
+        max_short_term = max(self._short_term_values_100ms) if self._short_term_values_100ms else -np.inf
+        current_momentary = self._momentary_values[-1] if self._momentary_values else -np.inf
+        current_short_term = self._short_term_values_100ms[-1] if self._short_term_values_100ms else -np.inf
+        true_peak_db = 20.0 * np.log10(self._max_tp_linear) if self._max_tp_linear > 0.0 else -np.inf
+
         result = {
             'integrated': integrated,
             'short_term': current_short_term,
@@ -467,7 +509,49 @@ class ITU1770Meter:
             'max_short_term': max_short_term,
             'max_momentary': max_momentary,
             'blocks': blocks_loudness,
-            'short_term_curve': short_term_values_1s,
+            'short_term_curve': list(self._short_term_values_1s),
         }
+
         self._cb(progress_callback, "测量完成", 100.0)
         return result
+
+    def process_audio(self, audio: np.ndarray, sr: Optional[int] = None,
+                      progress_callback: Optional[Callable] = None) -> dict:
+        """
+        兼容旧接口：处理完整音频并返回测量结果。
+        内部已被实现为流式接口的薄封装，结果与新流式接口一致。
+
+        Args:
+            audio: 音频数据，shape 为 (samples,) 或 (samples, channels)
+            sr: 原始采样率。若非 48000，会先重采样到 48000。
+            progress_callback: 进度回调，签名为 (step_name, overall_progress_pct)
+
+        Returns:
+            dict，与 finalize() 返回字段相同。
+        """
+        if audio is None or len(audio) == 0:
+            return {
+                'integrated': -np.inf, 'short_term': -np.inf,
+                'momentary': -np.inf, 'true_peak': -np.inf,
+                'lra': 0.0, 'max_short_term': -np.inf,
+                'max_momentary': -np.inf, 'blocks': [],
+                'short_term_curve': []
+            }
+
+        actual_sr = sr if sr is not None else self.sample_rate
+        self.reset(actual_sr)
+
+        if audio.ndim == 1:
+            audio = audio.reshape(-1, 1)
+        audio = np.asarray(audio, dtype=np.float64)
+
+        total_samples = len(audio)
+        chunk_samples = actual_sr  # 1 秒原始采样一块，与旧版 _resample_to_48k 分块一致
+
+        for start in range(0, total_samples, chunk_samples):
+            end = min(start + chunk_samples, total_samples)
+            chunk = audio[start:end]
+            progress = (end / total_samples) * 100.0 if total_samples > 0 else 100.0
+            self.feed(chunk, progress_callback=progress_callback, overall_progress=progress)
+
+        return self.finalize(progress_callback=progress_callback)

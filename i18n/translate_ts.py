@@ -87,9 +87,9 @@ TRANS = {
     "参考布局: {layout}": "Reference Layout: {layout}",
     "多单声道文件列表:": "Multi-Mono File List:",
     "测量结果:": "Measurement Results:",
-    "  节目响度:      {val:+.2f} LUFS": "  Program Loudness:      {val:+.2f} LUFS",
-    "  最大短时响度:  {val:+.2f} LUFS": "  Max Short-term Loudness:  {val:+.2f} LUFS",
-    "  最大瞬时响度:  {val:+.2f} LUFS": "  Max Momentary Loudness:  {val:+.2f} LUFS",
+    "  节目响度:      {val:+.2f} LKFS": "  Program Loudness:      {val:+.2f} LKFS",
+    "  最大短时响度:  {val:+.2f} LKFS": "  Max Short-term Loudness:  {val:+.2f} LKFS",
+    "  最大瞬时响度:  {val:+.2f} LKFS": "  Max Momentary Loudness:  {val:+.2f} LKFS",
     "  最大真峰值:    {val:+.2f} dBTP": "  Max True Peak:    {val:+.2f} dBTP",
     "  响度范围:      {val:.2f} LU": "  Loudness Range:      {val:.2f} LU",
     "合规性:": "Compliance:",
@@ -176,7 +176,7 @@ TRANS = {
     "响度范围(LRA)": "Loudness Range (LRA)",
     "自动检测": "Auto Detect",
     "自定义": "Custom",
-    "目标: {target} LUFS (±{tol} LU)\n峰值: {peak} dBTP": "Target: {target} LUFS (±{tol} LU)\nPeak: {peak} dBTP",
+    "目标: {target} LKFS (±{tol} LU)\n峰值: {peak} dBTP": "Target: {target} LKFS (±{tol} LU)\nPeak: {peak} dBTP",
     "每秒最大真峰值": "Max True Peak per Second",
     "时间(秒)": "Time (s)",
     "真峰值(dBTP)": "True Peak (dBTP)",
@@ -185,7 +185,7 @@ TRANS = {
 }
 
 def main():
-    ts_path = Path(__file__).with_name("ImmersiveLoudness_en.ts")
+    ts_path = Path(__file__).with_name("LouDuck_en.ts")
     text = ts_path.read_text(encoding="utf-8")
 
     # Replace each unfinished translation with the English text

@@ -248,8 +248,9 @@ class DetailedMeasurementWorker(QThread):
     def run(self):
         try:
             start_time = time.time()
-            audio = None
             sr = None
+            num_channels = None
+            total_samples = 0
             filename = self.tr("测量文件")
             
             # === 阶段1: 准备 (0-15%) ===
@@ -259,63 +260,34 @@ class DetailedMeasurementWorker(QThread):
                 file_path = self.input_data
                 info = sf.info(file_path)
                 sr = info.samplerate
+                num_channels = info.channels
+                total_samples = info.frames
                 filename = Path(file_path).name
                 file_size = Path(file_path).stat().st_size
                 
-                # 小文件(<50MB)直接加载
-                if file_size < 50 * 1024 * 1024:
-                    self.sub_step.emit(self.tr("加载: {name}").format(name=filename[:30]), 5)
-                    audio, sr = sf.read(file_path, dtype='float32')
-                    self.sub_step.emit(self.tr("加载完成"), 15)
-                else:
-                    # 大文件分块加载，显示进度 5-15%
-                    audio, sr = self._load_large_file(file_path, file_size)
+                # 所有文件统一走流式读取，避免小文件/大文件逻辑分叉
+                audio_iter = self._iter_audio_file(file_path, file_size)
                     
             elif self.input_mode == 'adm':
                 parser = self.input_data
-                self.sub_step.emit(self.tr("读取 ADM..."), 5)
-                audio, sr = parser.read_audio()
-                self.sub_step.emit(self.tr("ADM 加载完成"), 15)
+                info = sf.info(parser.file_path)
+                sr = info.samplerate
+                num_channels = info.channels
+                total_samples = info.frames
                 filename = self.tr("ADM文件")
+                
+                # ADM 也使用流式读取
+                audio_iter = parser.iter_audio_blocks(block_samples=sr, dtype='float32')
                 
             elif self.input_mode == 'mono_list':
                 mono_files = self.input_data
-                total_files = len(mono_files)
-                
-                self.sub_step.emit(self.tr("分析文件..."), 2)
-                max_samples = 0
-                sr = None
-                
-                for i, (path, name) in enumerate(mono_files):
-                    info = sf.info(path)
-                    max_samples = max(max_samples, info.frames)
-                    if sr is None:
-                        sr = info.samplerate
-                    progress = 2 + (i + 1) / total_files * 5
-                    self.sub_step.emit(self.tr("分析: {name}").format(name=name), int(progress))
-                
-                num_channels = len(mono_files)
-                audio = np.zeros((max_samples, num_channels), dtype=np.float32)
-                
-                for i, (path, name) in enumerate(mono_files):
-                    progress = 7 + i / num_channels * 8
-                    self.sub_step.emit(self.tr("加载: {name}").format(name=name), int(progress))
-                    data, _ = sf.read(path, dtype='float32')
-                    if data.ndim > 1:
-                        data = data[:, 0]
-                    copy_len = min(len(data), max_samples)
-                    audio[:copy_len, i] = data[:copy_len]
-                
-                self.sub_step.emit(self.tr("多单声道加载完成"), 15)
+                sr, num_channels, total_samples, audio_iter = self._iter_mono_files(mono_files)
+                filename = self.tr("多单声道文件")
             
-            if audio is None:
+            if sr is None or num_channels is None:
                 raise ValueError(self.tr("音频加载失败"))
             
-            if audio.ndim == 1:
-                audio = audio.reshape(-1, 1)
-            
-            actual_duration = len(audio) / sr
-            num_channels = audio.shape[1]
+            actual_duration = total_samples / sr
             self.audio_duration = actual_duration  # 保存音频时长用于倍速计算
             
             # === 阶段2: 初始化测量器 (15-20%) ===
@@ -332,11 +304,11 @@ class DetailedMeasurementWorker(QThread):
                     config = ITU1770Meter.CONFIGS.get(config_name, ITU1770Meter.auto_config(num_channels))
                 meter = ITU1770Meter(config, sr)
             
+            meter.reset(sr)
             self.sub_step.emit(self.tr("开始测量..."), 20)
             self.process_start_time = time.time()  # 记录处理开始时间
 
             # === 阶段3: 响度测量 (20-90%) ===
-            # 使用回调函数获取进度（适配新版 ITU1770Meter 的进度报告）
             def on_process_progress(step_name, overall_progress_pct):
                 # 检查是否请求中断
                 if self.isInterruptionRequested():
@@ -357,7 +329,19 @@ class DetailedMeasurementWorker(QThread):
                 self.sub_step.emit(f"{step_name}{speed_str}", int(progress_pct))
 
             try:
-                result = meter.process_audio(audio, sr, progress_callback=on_process_progress)
+                processed_samples = 0
+                for chunk, _sr in audio_iter:
+                    if self.isInterruptionRequested():
+                        raise RuntimeError("__INTERRUPTED__")
+                    
+                    if chunk.ndim == 1:
+                        chunk = chunk.reshape(-1, 1)
+                    
+                    progress = (processed_samples / total_samples) * 100.0 if total_samples > 0 else 100.0
+                    meter.feed(chunk, progress_callback=on_process_progress, overall_progress=progress)
+                    processed_samples += chunk.shape[0]
+                
+                result = meter.finalize(progress_callback=on_process_progress)
             except RuntimeError as e:
                 if str(e) == "__INTERRUPTED__":
                     self.sub_step.emit(self.tr("测量已停止"), 0)
@@ -403,39 +387,86 @@ class DetailedMeasurementWorker(QThread):
             import traceback
             self.error.emit(f"{str(e)}\n{traceback.format_exc()}")
     
-    def _load_large_file(self, file_path, file_size):
-        """加载大文件并显示进度 (5-15%)"""
+    def _iter_audio_file(self, file_path, file_size):
+        """流式分块读取普通音频文件，显示进度 5-15%"""
+        import soundfile as sf
+        import numpy as np
         info = sf.info(file_path)
         sr = info.samplerate
         total_samples = info.frames
-        num_channels = info.channels
-        audio = np.zeros((total_samples, num_channels), dtype='float32')
         
         with sf.SoundFile(file_path, 'r') as f:
-            idx = 0
-            chunk_samples = 1024 * 1024  # 1MB chunks
-            
-            while True:
-                chunk = f.read(chunk_samples, dtype='float32')
-                if len(chunk) == 0:
-                    break
+            chunk_samples = sr  # 1 秒一块（按原始采样率）
+            for chunk in f.blocks(blocksize=chunk_samples, dtype='float32', always_2d=True):
                 
-                if chunk.ndim == 1:
-                    chunk = chunk.reshape(-1, 1)
-                
-                chunk_len = len(chunk)
-                end_idx = min(idx + chunk_len, total_samples)
-                audio[idx:end_idx] = chunk[:end_idx-idx]
-                idx = end_idx
-                
-                # 用已读取帧数占总帧数的比例计算进度，避免按字节估算导致的截断 bug
                 progress = 5 + (f.tell() / total_samples) * 10
                 bytes_per_frame = file_size / total_samples if total_samples > 0 else 0
                 mb_loaded = (f.tell() * bytes_per_frame) / (1024 * 1024)
                 mb_total = file_size / (1024 * 1024)
                 self.sub_step.emit(self.tr("加载中... {mb_loaded:.1f}/{mb_total:.1f} MB").format(mb_loaded=mb_loaded, mb_total=mb_total), int(progress))
+                yield chunk, sr
+    
+    def _iter_mono_files(self, mono_files):
+        """流式读取多个单声道文件，返回 (sr, num_channels, total_samples, generator)"""
+        import soundfile as sf
+        import numpy as np
+        total_files = len(mono_files)
         
-        return audio, sr
+        # 分析所有文件
+        max_samples = 0
+        sr = None
+        for path, name in mono_files:
+            info = sf.info(path)
+            max_samples = max(max_samples, info.frames)
+            if sr is None:
+                sr = info.samplerate
+        
+        num_channels = total_files
+        self.sub_step.emit(self.tr("分析文件完成"), 7)
+        
+        def _generator():
+            """内部生成器，负责实际分块读取"""
+            import soundfile as sf
+            import numpy as np
+            handles = [sf.SoundFile(path, 'r') for path, _ in mono_files]
+            try:
+                chunk_samples = sr  # 1 秒一块
+                chunk_idx = 0
+                while True:
+                    chunks = []
+                    all_empty = True
+                    for i, f in enumerate(handles):
+                        chunk = f.read(chunk_samples, dtype='float32')
+                        if len(chunk) > 0:
+                            all_empty = False
+                            if chunk.ndim > 1:
+                                chunk = chunk[:, 0]
+                        else:
+                            chunk = np.zeros(0, dtype='float32')
+                        chunks.append(chunk)
+                    
+                    if all_empty:
+                        break
+                    
+                    max_len = max(len(c) for c in chunks)
+                    if max_len == 0:
+                        break
+                    
+                    out = np.zeros((max_len, num_channels), dtype='float32')
+                    for i, chunk in enumerate(chunks):
+                        out[:len(chunk), i] = chunk
+                    
+                    progress = 7 + (chunk_idx * chunk_samples / max_samples) * 8
+                    self.sub_step.emit(self.tr("加载多单声道... {current}/{total}").format(current=chunk_idx+1, total=total_files), int(progress))
+                    chunk_idx += 1
+                    
+                    yield out, sr
+            finally:
+                for f in handles:
+                    f.close()
+        
+        return sr, num_channels, max_samples, _generator()
+    
 
     def _build_detailed_data(self, result: dict, duration: float) -> dict:
         """构建详细时序数据，精确到秒
@@ -519,47 +550,20 @@ class DetailedMeasurementWorker(QThread):
             'true_peak_per_second': true_peak_per_second
         }
 
-    def _load_mono_files(self, mono_files):
-        """加载多个单声道文件并显示进度"""
-        total_files = len(mono_files)
-        
-        # 分析所有文件
-        max_samples = 0
-        sr = None
-        for path, name in mono_files:
-            info = sf.info(path)
-            max_samples = max(max_samples, info.frames)
-            if sr is None:
-                sr = info.samplerate
-        
-        num_channels = len(mono_files)
-        audio = np.zeros((max_samples, num_channels), dtype='float32')
-        
-        # 逐个加载
-        for i, (path, name) in enumerate(mono_files):
-            progress = 10 + (i / total_files) * 20
-            self.sub_step.emit(self.tr("加载: {name} ({current}/{total})").format(name=name, current=i+1, total=total_files), int(progress))
-            
-            data, _ = sf.read(path, dtype='float32')
-            if data.ndim > 1:
-                data = data[:, 0]
-            
-            copy_len = min(len(data), max_samples)
-            audio[:copy_len, i] = data[:copy_len]
-        
-        return audio, sr
 
 
 class ADMRenderWorker(QThread):
     """ADM 渲染后台线程，带进度反馈"""
     progress = Signal(int)
+    status = Signal(str)
     finished_signal = Signal(str)
     error = Signal(str)
     
-    def __init__(self, input_path: str, target_layout: str):
+    def __init__(self, input_path: str, target_layout: str, num_objects: int = 0):
         super().__init__()
         self.input_path = input_path
         self.target_layout = target_layout
+        self.num_objects = num_objects
         self._cancelled = False
     
     def run(self):
@@ -570,6 +574,14 @@ class ADMRenderWorker(QThread):
             if src_dir not in sys.path:
                 sys.path.insert(0, src_dir)
             from renderers.ear_renderer import render_adm_with_progress
+            
+            # EAR 在产出第一个数据块前需要大量初始化（解析 ADM、构建渲染图等），
+            # 提前 emit 初始化状态，避免进度条长时间停在 0% 看起来像卡死。
+            if self.num_objects > 0:
+                init_msg = self.tr("正在初始化 ADM 渲染器（{n} 个对象）...").format(n=self.num_objects)
+            else:
+                init_msg = self.tr("正在初始化 ADM 渲染器...")
+            self.status.emit(init_msg)
             
             def on_progress(percent: int):
                 if not self._cancelled:
@@ -594,7 +606,7 @@ class ADMRenderWorker(QThread):
 class LoudnessMeterApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Louduck")
+        self.setWindowTitle("LouDuck")
         self.setMinimumSize(1280, 620)
         self.resize(1280, 650)
         
@@ -861,10 +873,15 @@ class LoudnessMeterApp(QMainWindow):
         layout.setSpacing(12)
         layout.setContentsMargins(14, 14, 14, 14)
 
-        # === 1. 文件导入按钮 ===
-        self.btn_file = QPushButton(self.tr("📁 文件导入"))
+        # === 1. 文件导入按钮（EasyImport） + 帮助按钮 ===
+        file_import_layout = QHBoxLayout()
+        file_import_layout.setSpacing(8)
+        file_import_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.btn_file = QPushButton(self.tr("📁 文件导入（EasyImport）"))
         self.btn_file.setCursor(Qt.PointingHandCursor)
         self.btn_file.clicked.connect(self.browse)
+        self.btn_file.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.btn_file.setStyleSheet("""
             QPushButton {
                 background-color: #667eea;
@@ -877,7 +894,29 @@ class LoudnessMeterApp(QMainWindow):
             }
             QPushButton:hover { background-color: #764ba2; }
         """)
-        layout.addWidget(self.btn_file)
+        file_import_layout.addWidget(self.btn_file, stretch=88)
+
+        self.btn_easy_import_help = QPushButton("?")
+        self.btn_easy_import_help.setCursor(Qt.PointingHandCursor)
+        self.btn_easy_import_help.setToolTip(self.tr("EasyImport 说明"))
+        self.btn_easy_import_help.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.btn_easy_import_help.setMinimumWidth(28)
+        self.btn_easy_import_help.setStyleSheet("""
+            QPushButton {
+                background-color: #4a5568;
+                border: 1px solid #718096;
+                border-radius: 4px;
+                font-size: 13px;
+                font-weight: bold;
+                color: white;
+                padding: 2px 4px;
+            }
+            QPushButton:hover { background-color: #718096; }
+        """)
+        self.btn_easy_import_help.clicked.connect(self.show_easy_import_help)
+        file_import_layout.addWidget(self.btn_easy_import_help, stretch=10)
+
+        layout.addLayout(file_import_layout)
 
         # === 2. 文件信息卡片 ===
         # === 2. 文件信息卡片（单个多声道/ADM 模式显示） ===
@@ -1376,11 +1415,23 @@ class LoudnessMeterApp(QMainWindow):
             self.file_meta_labels['channels'].setText(str(info.channels))
             self.file_meta_labels['samplerate'].setText(f"{info.samplerate} Hz")
             self.file_meta_labels['bit_depth'].setText(str(info.subtype_info))
-            self.file_meta_labels['duration'].setText(f"{info.duration:.2f} s")
+            self.file_meta_labels['duration'].setText(self._format_duration(info.duration))
             self.file_meta_labels['file_size'].setText(size_str)
         except Exception as e:
             print(f"[元数据读取失败] {e}")
             self._clear_file_metadata()
+
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        """格式化时长：不足1分钟显示秒，超过1分钟显示 xx分xx秒"""
+        if seconds >= 60.0:
+            minutes = int(seconds // 60)
+            secs = int(seconds % 60)
+            millis = int((seconds % 1) * 1000)
+            if millis > 0:
+                return f"{minutes}分{secs:02d}.{millis:03d}秒"
+            return f"{minutes}分{secs:02d}秒"
+        return f"{seconds:.2f}秒"
 
     @staticmethod
     def _format_file_size(size_bytes: int) -> str:
@@ -1726,7 +1777,7 @@ class LoudnessMeterApp(QMainWindow):
     def update_std_info(self):
         std = self.current_standard
         self.std_info.setText(
-            self.tr("目标: {target} LUFS (±{tol} LU)\n峰值: {peak} dBTP")
+            self.tr("目标: {target} LKFS (±{tol} LU)\n峰值: {peak} dBTP")
             .format(target=f"{std.integrated_target:+.1f}",
                     tol=f"{std.integrated_tolerance:.1f}",
                     peak=f"{std.true_peak_limit:+.1f}")
@@ -1793,9 +1844,16 @@ class LoudnessMeterApp(QMainWindow):
         self.render_progress.setValue(0)
         self.render_progress.setVisible(True)
 
+        # 获取动态对象数量，用于初始化状态提示
+        num_objects = 0
+        if hasattr(self, 'current_adm_parser') and self.current_adm_parser and self.current_adm_parser.adm:
+            adm = self.current_adm_parser.adm
+            num_objects = len([ch for ch in adm.channel_formats if ch.type == 'Objects'])
+
         # 启动后台渲染线程
-        self._render_worker = ADMRenderWorker(self.current_file, target_layout)
+        self._render_worker = ADMRenderWorker(self.current_file, target_layout, num_objects=num_objects)
         self._render_worker.progress.connect(self._on_render_progress)
+        self._render_worker.status.connect(self._on_render_status)
         self._render_worker.finished_signal.connect(self._on_render_finished)
         self._render_worker.error.connect(self._on_render_error)
         self._render_worker.start()
@@ -1803,6 +1861,10 @@ class LoudnessMeterApp(QMainWindow):
     def _on_render_progress(self, percent: int):
         """更新渲染进度条"""
         self.render_progress.setValue(percent)
+
+    def _on_render_status(self, message: str):
+        """更新渲染状态文本（如初始化提示）"""
+        self.render_step_label.setText(message)
 
     def _on_render_finished(self, output_path: str):
         """渲染完成，保留 ADM UI 信息，仅更新文件信息为渲染后的文件"""
@@ -1878,9 +1940,11 @@ class LoudnessMeterApp(QMainWindow):
 
         else:
             # 多个文件：强制要求所有文件都是单声道 WAV
+            file_infos = {}
             for path in files:
                 try:
                     info = sf.info(path)
+                    file_infos[path] = info
                 except Exception as e:
                     QMessageBox.critical(self, self.tr("错误"), self.tr("无法读取文件 {name}: {err}").format(name=Path(path).name, err=str(e)))
                     return
@@ -1897,6 +1961,34 @@ class LoudnessMeterApp(QMainWindow):
                     )
                     return
 
+
+            # 校验所有单声道文件时长是否一致
+            durations = {p: file_infos[p].duration for p in files}
+            unique_durations = sorted(set(durations.values()))
+            if len(unique_durations) > 1:
+                from collections import Counter
+                duration_counts = Counter(durations.values())
+                common_duration = duration_counts.most_common(1)[0][0]
+                different = [(Path(p).name, d) for p, d in durations.items() if abs(d - common_duration) > 1e-6]
+                
+                lines = [self.tr("以下文件时长与其他文件不一致："), ""]
+                for name, d in different:
+                    lines.append(f"  • {name}: {self._format_duration(d)}")
+                lines.append("")
+                lines.append(self.tr("多数文件时长: {duration}").format(duration=self._format_duration(common_duration)))
+                lines.append("")
+                lines.append(self.tr("请统一所有文件时长后重新导入测量。"))
+                
+                QMessageBox.warning(
+                    self, self.tr("时长不一致"),
+                    "\\n".join(lines)
+                )
+                return
+
+            common_duration = unique_durations[0]
+            common_sr = file_infos[files[0]].samplerate
+            common_subtype = file_infos[files[0]].subtype_info
+            total_size = sum(Path(p).stat().st_size for p in files)
             # 进入多单声道模式
             self.on_input_mode_changed('file')
             self.current_file = None
@@ -1904,6 +1996,14 @@ class LoudnessMeterApp(QMainWindow):
             self.filename_label.setText(self.tr("✓ {count} 个单声道文件").format(count=len(files)))
             self.filename_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #27ae60;")
             self.path_label.setText(str(Path(files[0]).parent))
+
+            # 显示聚合后的文件元数据
+            self.file_meta_labels['format'].setText('WAV')
+            self.file_meta_labels['channels'].setText(str(len(files)))
+            self.file_meta_labels['samplerate'].setText(f'{common_sr} Hz')
+            self.file_meta_labels['bit_depth'].setText(str(common_subtype))
+            self.file_meta_labels['duration'].setText(self._format_duration(common_duration))
+            self.file_meta_labels['file_size'].setText(self._format_file_size(total_size))
 
             # 自动匹配声道
             template_map = {
@@ -1927,6 +2027,19 @@ class LoudnessMeterApp(QMainWindow):
             # 刷新 UI 显隐，确保 mono_section 正确显示
             self._update_mode_ui('file')
 
+    def show_easy_import_help(self):
+        """显示 EasyImport 功能说明"""
+        QMessageBox.information(
+            self,
+            self.tr("EasyImport 说明"),
+            self.tr(
+                "EasyImport：\n"
+                "直接选择任意封装格式待测文件，自动识别\n"
+                "  ★ 多个单声道——自动完成文件->声道映射\n"
+                "  ★ 单个多声道——自动识别内部顺序\n"
+                "  ★ ADM BWF——解析元数据信息，提供目标声道格式选择及“渲染并测量”功能"
+            ),
+        )
 
     
     def start_measure(self):
@@ -2002,9 +2115,9 @@ class LoudnessMeterApp(QMainWindow):
         
         # 更新结果表格
         data = [
-            (f"{results['integrated']:+.2f}", "LUFS"),
-            (f"{results['short_term']:+.2f}", "LUFS"),
-            (f"{results['momentary']:+.2f}", "LUFS"),
+            (f"{results['integrated']:+.2f}", "LKFS"),
+            (f"{results['short_term']:+.2f}", "LKFS"),
+            (f"{results['momentary']:+.2f}", "LKFS"),
             (f"{results['true_peak']:+.2f}", "dBTP"),
             (f"{results['lra']:.2f}", "LU")
         ]
@@ -2315,7 +2428,7 @@ class LoudnessMeterApp(QMainWindow):
         is_exceed = int_status == '超标'
         ws.cell(row=row, column=1, value='节目响度').font = normal_font
         ws.cell(row=row, column=2, value=f'{int_val:+.2f}').font = red_font if is_exceed else normal_font
-        ws.cell(row=row, column=3, value='LUFS').font = normal_font
+        ws.cell(row=row, column=3, value='LKFS').font = normal_font
         ws.cell(row=row, column=4, value=f'{int_target:+.1f} ± {int_tol:.1f}').font = normal_font
         status_cell = ws.cell(row=row, column=5, value=int_status)
         status_cell.font = red_font if is_exceed else normal_font
@@ -2330,7 +2443,7 @@ class LoudnessMeterApp(QMainWindow):
         st_val = summary['max_short_term']
         ws.cell(row=row, column=1, value='最大短时响度').font = normal_font
         ws.cell(row=row, column=2, value=f'{st_val:+.2f}').font = normal_font
-        ws.cell(row=row, column=3, value='LUFS').font = normal_font
+        ws.cell(row=row, column=3, value='LKFS').font = normal_font
         ws.cell(row=row, column=4, value='-').font = normal_font
         ws.cell(row=row, column=5, value='合格').font = normal_font
         for col in range(1, 6):
@@ -2342,7 +2455,7 @@ class LoudnessMeterApp(QMainWindow):
         mom_val = summary['max_momentary']
         ws.cell(row=row, column=1, value='最大瞬时响度').font = normal_font
         ws.cell(row=row, column=2, value=f'{mom_val:+.2f}').font = normal_font
-        ws.cell(row=row, column=3, value='LUFS').font = normal_font
+        ws.cell(row=row, column=3, value='LKFS').font = normal_font
         ws.cell(row=row, column=4, value='-').font = normal_font
         ws.cell(row=row, column=5, value='合格').font = normal_font
         for col in range(1, 6):
@@ -2401,7 +2514,7 @@ class LoudnessMeterApp(QMainWindow):
             cell.alignment = Alignment(horizontal='left', vertical='center')
             row += 2
             
-            st_headers = ['时间(秒)', '短时响度(LUFS)', '状态']
+            st_headers = ['时间(秒)', '短时响度(LKFS)', '状态']
             for col, header in enumerate(st_headers, 1):
                 cell = ws.cell(row=row, column=col, value=header)
                 cell.font = header_font
@@ -2605,7 +2718,7 @@ def ensure_single_instance(app):
     from PySide6.QtNetwork import QLocalServer, QLocalSocket
     from PySide6.QtWidgets import QApplication, QMainWindow
 
-    socket_name = "Louduck_SingleInstance"
+    socket_name = "LouDuck_SingleInstance"
 
     # 尝试连接已有实例
     socket = QLocalSocket()
@@ -2673,10 +2786,10 @@ def main():
     
     if args.lang:
         # 强制指定语言
-        qm_path = _get_resource_path(f'i18n/ImmersiveLoudness_{args.lang}.qm')
+        qm_path = _get_resource_path(f'i18n/LouDuck_{args.lang}.qm')
         if not qm_path.exists():
             # 尝试加上地区后缀
-            qm_path = _get_resource_path(f'i18n/ImmersiveLoudness_{args.lang}_US.qm')
+            qm_path = _get_resource_path(f'i18n/LouDuck_{args.lang}_US.qm')
     else:
         # 跨平台读取系统显示语言
         locale_name = QLocale.system().name()
@@ -2699,11 +2812,11 @@ def main():
                     locale_name = langs[0].replace('-', '_')
         except Exception:
             pass
-        qm_path = _get_resource_path(f'i18n/ImmersiveLoudness_{locale_name}.qm')
+        qm_path = _get_resource_path(f'i18n/LouDuck_{locale_name}.qm')
         if not qm_path.exists() and '_' in locale_name:
             # fallback to language code only, e.g. "en" from "en_US"
             lang = locale_name.split('_')[0]
-            qm_path = _get_resource_path(f'i18n/ImmersiveLoudness_{lang}.qm')
+            qm_path = _get_resource_path(f'i18n/LouDuck_{lang}.qm')
     
     if qm_path.exists():
         if translator.load(str(qm_path)):

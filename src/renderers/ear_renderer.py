@@ -9,8 +9,16 @@ EBU ADM Renderer (EAR) 包装层
 import re
 import struct
 import tempfile
+import warnings
 from pathlib import Path
 from typing import Optional, List
+
+# 抑制 EAR 在修正 ADM blockFormat timing 时产生的大量 UserWarning，避免 terminal 被刷屏
+warnings.filterwarnings(
+    "ignore",
+    category=UserWarning,
+    module="ear.fileio.adm.timing_fixes",
+)
 
 from ear.cmdline.render_file import OfflineRenderDriver, PeakMonitor
 from ear.core.bs2051 import layout_names, get_layout

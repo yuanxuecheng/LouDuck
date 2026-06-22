@@ -30,10 +30,10 @@ def analyze_lra(file_path: str):
     lra = meter._lra(st_1s)
 
     print(f"\n=== 核心结果 ===")
-    print(f"Integrated: {integrated:.3f} LUFS")
+    print(f"Integrated: {integrated:.3f} LKFS")
     print(f"True Peak:  {true_peak:.3f} dBTP")
-    print(f"Max Momentary: {max_m:.3f} LUFS")
-    print(f"Max Short-term: {max_s:.3f} LUFS")
+    print(f"Max Momentary: {max_m:.3f} LKFS")
+    print(f"Max Short-term: {max_s:.3f} LKFS")
     print(f"LRA: {lra:.3f} LU")
 
     print(f"\n=== 1s 步进 Short-term 序列 ({len(st_1s)} 个值) ===")
@@ -84,12 +84,12 @@ def analyze_lra(file_path: str):
     # 输出前20个和后20个 short-term 值
     print(f"\n=== Short-term 值序列 (前20) ===")
     for i, v in enumerate(st_1s[:20]):
-        print(f"  [{i:3d}] {v:+.3f} LUFS")
+        print(f"  [{i:3d}] {v:+.3f} LKFS")
     if len(st_1s) > 40:
         print(f"  ... ({len(st_1s)-40} values omitted) ...")
     print(f"=== Short-term 值序列 (后20) ===")
     for i, v in enumerate(st_1s[-20:], start=len(st_1s)-20):
-        print(f"  [{i:3d}] {v:+.3f} LUFS")
+        print(f"  [{i:3d}] {v:+.3f} LKFS")
 
 
 if __name__ == '__main__':
