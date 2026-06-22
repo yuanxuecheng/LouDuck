@@ -2685,7 +2685,7 @@ def _show_splash(app):
     painter.setPen(QColor("#667eea"))
     painter.setFont(QFont("Segoe UI", 10))
     fm = QFontMetrics(painter.font())
-    text = "v1.0  (build 260603)"
+    text = "v1.0.1  (build 260622)"
     x = card_x + (card_w - fm.horizontalAdvance(text)) // 2
     painter.drawText(x, card_y + 175, text)
 
