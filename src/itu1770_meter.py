@@ -44,6 +44,19 @@ from scipy import signal
 from dataclasses import dataclass
 from typing import List, Optional, Callable
 from collections import deque
+from typing import List, Optional, Callable, Tuple  # 确保包含 Tuple
+
+try:
+    from PySide6.QtCore import QCoreApplication
+except ImportError:
+    QCoreApplication = None
+
+
+def _tr(context: str, text: str) -> str:
+    """翻译包装器，无 Qt 时回退原文"""
+    if QCoreApplication is not None:
+        return QCoreApplication.translate(context, text)
+    return text
 
 
 @dataclass
@@ -452,7 +465,7 @@ class ITU1770Meter:
         # 流式化后，单个 chunk 内同时完成重采样/K-加权/真峰值/响度统计，
         # 不再区分传统“步骤”，只报告统一进度。
         pct = overall_progress if overall_progress is not None else 0.0
-        self._cb(progress_callback, "流式响度测量", pct)
+        self._cb(progress_callback, _tr("ITU1770Meter", "流式响度测量"), pct)
 
         # ---- 阶段 1: 重采样到 48kHz ----
         if actual_sr != 48000:
@@ -485,14 +498,14 @@ class ITU1770Meter:
                 blocks: List[float]    # 400ms 块响度序列（LKFS）
                 short_term_curve: List[float]  # 1s 步进短时响度序列
         """
-        self._cb(progress_callback, "计算集成响度", 25.0)
+        self._cb(progress_callback, _tr("ITU1770Meter", "计算集成响度"), 25.0)
         integrated, blocks_loudness = self._integrated_loudness()
 
-        self._cb(progress_callback, "计算响度范围", 80.0)
+        self._cb(progress_callback, _tr("ITU1770Meter", "计算响度范围"), 80.0)
         self._compute_short_term_1s()
         lra = self._lra(self._short_term_values_1s)
 
-        self._cb(progress_callback, "整理结果", 95.0)
+        self._cb(progress_callback, _tr("ITU1770Meter", "整理结果"), 95.0)
 
         max_momentary = max(self._momentary_values) if self._momentary_values else -np.inf
         max_short_term = max(self._short_term_values_100ms) if self._short_term_values_100ms else -np.inf
@@ -512,7 +525,7 @@ class ITU1770Meter:
             'short_term_curve': list(self._short_term_values_1s),
         }
 
-        self._cb(progress_callback, "测量完成", 100.0)
+        self._cb(progress_callback, _tr("ITU1770Meter", "测量完成"), 100.0)
         return result
 
     def process_audio(self, audio: np.ndarray, sr: Optional[int] = None,
