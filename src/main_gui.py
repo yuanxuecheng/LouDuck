@@ -7,6 +7,7 @@ ITU-R BS.1770-5 响度测量仪 v3.2 (整合修复版)
 - ADM解析兼容性（支持旧版adm_parser）
 """
 
+import os
 import sys
 import time
 import re
@@ -302,6 +303,12 @@ class DetailedMeasurementWorker(QThread):
                 else:
                     config_name = self.config_name if self.config_name in ITU1770Meter.CONFIGS else ITU1770Meter.auto_config(num_channels)
                     config = ITU1770Meter.CONFIGS.get(config_name, ITU1770Meter.auto_config(num_channels))
+                
+                # 防御性保护：配置声道数必须与音频通道数一致，否则回退到自动检测
+                if len(config) != num_channels:
+                    print(f"[测量器] 配置'{self.config_name}'({len(config)}ch)与音频{num_channels}ch不匹配，回退到自动检测")
+                    config = ITU1770Meter.auto_config(num_channels)
+                
                 meter = ITU1770Meter(config, sr)
             
             meter.reset(sr)
@@ -2018,9 +2025,14 @@ class LoudnessMeterApp(QMainWindow):
             self.mono_files = auto_match_mono_files(files, template_name=template_name)
 
             cfg_map = {2: 'stereo', 6: '5.1', 8: '7.1', 10: '5.1.4', 12: '7.1.4'}
-            matched_count = sum(1 for _, ch in self.mono_files if ch != '?')
-            if matched_count in cfg_map:
-                self.config_combo.setCurrentText(cfg_map[matched_count])
+            # 多单声道模式的通道数就是文件数量，必须按实际文件数设置配置，
+            # 而不是按自动匹配成功的数量（可能有部分文件未能识别）。
+            file_count = len(self.mono_files)
+            if file_count in cfg_map:
+                self.config_combo.setCurrentText(cfg_map[file_count])
+            elif file_count > 0:
+                # 文件数量不在标准配置中时回退到自动检测
+                self.config_combo.setCurrentText(self.tr("自动检测"))
 
             self._update_mono_files_list()
             # 刷新 UI 显隐，确保 mono_section 正确显示
@@ -2759,6 +2771,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--lang', default=None, help='Force language, e.g. en, zh')
     args, remaining = parser.parse_known_args()
+    
+    # 在导入 numpy/scipy 之前设置 BLAS 单线程，避免 Apple Silicon 上
+    # 多线程并发导致的 SIGBUS / bus error（常见于 EAR 渲染时）。
+    if sys.platform == 'darwin':
+        os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
+        os.environ.setdefault('VECLIB_MAXIMUM_THREADS', '1')
+        os.environ.setdefault('MKL_NUM_THREADS', '1')
+        os.environ.setdefault('NUMEXPR_NUM_THREADS', '1')
     
     app = QApplication([sys.argv[0]] + remaining)
     app.setStyle('Fusion')
