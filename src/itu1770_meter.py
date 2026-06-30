@@ -460,6 +460,14 @@ class ITU1770Meter:
             chunk = chunk.reshape(-1, 1)
         chunk = np.asarray(chunk, dtype=np.float64)
 
+        # 防御性检查：chunk 通道数必须与初始化时的 channel_config 一致
+        if chunk.shape[1] != len(self.channel_config):
+            raise ValueError(
+                _tr("ITU1770Meter", "通道数不匹配: 音频{audio_ch}ch, 配置{cfg_ch}ch").format(
+                    audio_ch=chunk.shape[1], cfg_ch=len(self.channel_config)
+                )
+            )
+
         actual_sr = self._input_sr
 
         # 流式化后，单个 chunk 内同时完成重采样/K-加权/真峰值/响度统计，

@@ -294,7 +294,7 @@ class DetailedMeasurementWorker(QThread):
             self.sub_step.emit(self.tr("初始化: {num_channels} ch, {actual_duration:.1f} s").format(num_channels=num_channels, actual_duration=actual_duration), 15)
             
             if self.input_mode == 'adm':
-                adm_config = self.input_data.adm.to_itu1770_config()
+                adm_config = self.input_data.adm.to_itu1770_config(num_channels)
                 meter = ITU1770Meter(adm_config, sr)
             else:
                 if self.config_name == "自动检测":
@@ -657,7 +657,7 @@ class LoudnessMeterApp(QMainWindow):
         self.mono_files_table.blockSignals(True)
         if not self.mono_files:
             self.mono_files_table.setRowCount(0)
-            self.mono_files_group.setTitle('📋 声道匹配 (双击声道可编辑)')
+            self.mono_files_group.setTitle(self.tr('📋 声道匹配 (双击声道可编辑)'))
             self.mono_files_table.blockSignals(False)
             return
 
@@ -687,7 +687,7 @@ class LoudnessMeterApp(QMainWindow):
 
         self.mono_files_group.setVisible(True)
         matched = sum(1 for _, ch in self.mono_files if ch != '?')
-        self.mono_files_group.setTitle(f'📋 声道匹配 ({matched}/{len(self.mono_files)} 已匹配)')
+        self.mono_files_group.setTitle(self.tr('📋 声道匹配 ({matched}/{total} 已匹配)').format(matched=matched, total=len(self.mono_files)))
         self.mono_files_table.blockSignals(False)
     def parse_and_display_adm(self, file_path: str):
         """解析ADM文件并在UI中显示详细信息"""
@@ -775,7 +775,7 @@ class LoudnessMeterApp(QMainWindow):
             
             if detected and detected != 'unknown':
                 self.config_combo.setCurrentText(detected)
-                lines.append(self.tr("🎯 自动识别为: {desc} ({ch_count} ch 声床, 置信度 {conf})").format(desc=description, ch_count=ch_count, conf=f"{confidence:.0%}"))
+                lines.append(self.tr("🎯 自动识别为: {desc} ({ch_count} ch 声床, 置信度 {conf})").format(desc=self.tr(description), ch_count=ch_count, conf=f"{confidence:.0%}"))
             else:
                 # 回退到数量映射
                 cfg_map = {
@@ -1345,7 +1345,7 @@ class LoudnessMeterApp(QMainWindow):
         else:
             item.setForeground(QColor('#27ae60'))
         matched = sum(1 for _, ch in self.mono_files if ch != '?')
-        self.mono_files_group.setTitle(f'📋 声道匹配 ({matched}/{len(self.mono_files)} 已匹配)')
+        self.mono_files_group.setTitle(self.tr('📋 声道匹配 ({matched}/{total} 已匹配)').format(matched=matched, total=len(self.mono_files)))
 
 
     def _clear_mono_files(self):
@@ -1421,17 +1421,16 @@ class LoudnessMeterApp(QMainWindow):
             print(f"[元数据读取失败] {e}")
             self._clear_file_metadata()
 
-    @staticmethod
-    def _format_duration(seconds: float) -> str:
+    def _format_duration(self, seconds: float) -> str:
         """格式化时长：不足1分钟显示秒，超过1分钟显示 xx分xx秒"""
         if seconds >= 60.0:
             minutes = int(seconds // 60)
             secs = int(seconds % 60)
             millis = int((seconds % 1) * 1000)
             if millis > 0:
-                return f"{minutes}分{secs:02d}.{millis:03d}秒"
-            return f"{minutes}分{secs:02d}秒"
-        return f"{seconds:.2f}秒"
+                return self.tr("{minutes}分{secs:02d}.{millis:03d}秒").format(minutes=minutes, secs=secs, millis=millis)
+            return self.tr("{minutes}分{secs:02d}秒").format(minutes=minutes, secs=secs)
+        return self.tr("{seconds:.2f}秒").format(seconds=seconds)
 
     @staticmethod
     def _format_file_size(size_bytes: int) -> str:
@@ -1553,7 +1552,7 @@ class LoudnessMeterApp(QMainWindow):
         right_info.setSpacing(0)
         right_info.setAlignment(Qt.AlignRight | Qt.AlignBottom)
         
-        version_label = QLabel('v1.0  (build 260603)')
+        version_label = QLabel('v1.0.1  (build 260622)')
         version_label.setStyleSheet('color: #667eea; font-size: 8px; border: none;')
         version_label.setAlignment(Qt.AlignRight)
         right_info.addWidget(version_label)
@@ -2261,14 +2260,14 @@ class LoudnessMeterApp(QMainWindow):
         default_name = f"{base}_{timestamp}_{std_name}.{ext}"
         
         filter_map = {
-            'txt': "文本文件 (*.txt)",
-            'json': "JSON文件 (*.json)",
-            'excel': "Excel文件 (*.xlsx)"
+            'txt': self.tr("文本文件 (*.txt)"),
+            'json': self.tr("JSON文件 (*.json)"),
+            'excel': self.tr("Excel文件 (*.xlsx)")
         }
         filter_str = filter_map.get(fmt, f"*.{ext}")
         
         # 使用 QFileDialog 类确保默认文件名在 Windows 原生对话框中正确显示
-        dialog = QFileDialog(self, "导出")
+        dialog = QFileDialog(self, self.tr("导出"))
         dialog.setAcceptMode(QFileDialog.AcceptSave)
         dialog.setNameFilter(filter_str)
         dialog.selectFile(default_name)
@@ -2337,7 +2336,7 @@ class LoudnessMeterApp(QMainWindow):
         
         wb = openpyxl.Workbook()
         ws = wb.active
-        ws.title = "响度测量报告"
+        ws.title = self.tr("响度测量报告")
         
         # 样式定义
         title_font = Font(name='微软雅黑', size=14, bold=True, color='2F5496')
@@ -2354,25 +2353,25 @@ class LoudnessMeterApp(QMainWindow):
         # === 被测文件信息 ===
         fi = self.current_results.get('file_info', {})
         ws.merge_cells(f'A{row}:E{row}')
-        cell = ws.cell(row=row, column=1, value='被测文件信息')
+        cell = ws.cell(row=row, column=1, value=self.tr('被测文件信息'))
         cell.font = title_font
         cell.alignment = Alignment(horizontal='left', vertical='center')
         row += 2
         
         file_info_rows = [
-            ['测量时间', time.strftime('%Y-%m-%d %H:%M:%S')],
-            ['文件路径', fi.get('file_path', '-')],
-            ['文件名称', fi.get('file_name', self.current_results.get('filename', 'unknown'))],
+            [self.tr('测量时间'), time.strftime('%Y-%m-%d %H:%M:%S')],
+            [self.tr('文件路径'), fi.get('file_path', '-')],
+            [self.tr('文件名称'), fi.get('file_name', self.current_results.get('filename', 'unknown'))],
         ]
         if fi.get('renderer_info'):
-            file_info_rows.append(['渲染器', fi['renderer_info']])
+            file_info_rows.append([self.tr('渲染器'), fi['renderer_info']])
         if fi.get('authoring_info'):
-            file_info_rows.append(['创作软件', fi['authoring_info']])
+            file_info_rows.append([self.tr('创作软件'), fi['authoring_info']])
         if fi.get('ref_layout'):
-            file_info_rows.append(['参考布局', fi['ref_layout']])
+            file_info_rows.append([self.tr('参考布局'), fi['ref_layout']])
         if fi.get('mono_files'):
             for item in fi['mono_files']:
-                file_info_rows.append([f"声道 {item.get('channel', '?')}", item.get('name', '')])
+                file_info_rows.append([self.tr("声道 {channel}").format(channel=item.get('channel', '?')), item.get('name', '')])
         
         for label, value in file_info_rows:
             ws.cell(row=row, column=1, value=label).font = normal_font
@@ -2383,7 +2382,7 @@ class LoudnessMeterApp(QMainWindow):
         
         # ADM 信息单独处理：保留换行，合并单元格并自动换行显示
         if fi.get('adm_info'):
-            ws.cell(row=row, column=1, value='ADM 信息').font = normal_font
+            ws.cell(row=row, column=1, value=self.tr('ADM 信息')).font = normal_font
             ws.cell(row=row, column=1).alignment = Alignment(horizontal='left', vertical='top')
             adm_cell = ws.cell(row=row, column=2, value=fi['adm_info'])
             adm_cell.font = Font(name='Consolas', size=9)
@@ -2397,12 +2396,12 @@ class LoudnessMeterApp(QMainWindow):
         
         # === 整体测量结果 ===
         ws.merge_cells(f'A{row}:E{row}')
-        cell = ws.cell(row=row, column=1, value='整体测量结果')
+        cell = ws.cell(row=row, column=1, value=self.tr('整体测量结果'))
         cell.font = title_font
         cell.alignment = center_align
         row += 2
         
-        headers = ['指标', '数值', '单位', '标准限值', '状态']
+        headers = [self.tr('指标'), self.tr('数值'), self.tr('单位'), self.tr('标准限值'), self.tr('状态')]
         for col, header in enumerate(headers, 1):
             cell = ws.cell(row=row, column=col, value=header)
             cell.font = header_font
@@ -2424,9 +2423,9 @@ class LoudnessMeterApp(QMainWindow):
         int_val = summary['integrated_loudness']
         int_target = standard.integrated_target
         int_tol = standard.integrated_tolerance
-        int_status = '合格' if abs(int_val - int_target) <= int_tol else '超标'
+        int_status = self.tr('合格') if abs(int_val - int_target) <= int_tol else self.tr('超标')
         is_exceed = int_status == '超标'
-        ws.cell(row=row, column=1, value='节目响度').font = normal_font
+        ws.cell(row=row, column=1, value=self.tr('节目响度')).font = normal_font
         ws.cell(row=row, column=2, value=f'{int_val:+.2f}').font = red_font if is_exceed else normal_font
         ws.cell(row=row, column=3, value='LKFS').font = normal_font
         ws.cell(row=row, column=4, value=f'{int_target:+.1f} ± {int_tol:.1f}').font = normal_font
@@ -2441,11 +2440,11 @@ class LoudnessMeterApp(QMainWindow):
         
         # 最大短时响度
         st_val = summary['max_short_term']
-        ws.cell(row=row, column=1, value='最大短时响度').font = normal_font
+        ws.cell(row=row, column=1, value=self.tr('最大短时响度')).font = normal_font
         ws.cell(row=row, column=2, value=f'{st_val:+.2f}').font = normal_font
         ws.cell(row=row, column=3, value='LKFS').font = normal_font
         ws.cell(row=row, column=4, value='-').font = normal_font
-        ws.cell(row=row, column=5, value='合格').font = normal_font
+        ws.cell(row=row, column=5, value=self.tr('合格')).font = normal_font
         for col in range(1, 6):
             ws.cell(row=row, column=col).border = thin_border
             ws.cell(row=row, column=col).alignment = center_align
@@ -2453,11 +2452,11 @@ class LoudnessMeterApp(QMainWindow):
         
         # 最大瞬时响度
         mom_val = summary['max_momentary']
-        ws.cell(row=row, column=1, value='最大瞬时响度').font = normal_font
+        ws.cell(row=row, column=1, value=self.tr('最大瞬时响度')).font = normal_font
         ws.cell(row=row, column=2, value=f'{mom_val:+.2f}').font = normal_font
         ws.cell(row=row, column=3, value='LKFS').font = normal_font
         ws.cell(row=row, column=4, value='-').font = normal_font
-        ws.cell(row=row, column=5, value='合格').font = normal_font
+        ws.cell(row=row, column=5, value=self.tr('合格')).font = normal_font
         for col in range(1, 6):
             ws.cell(row=row, column=col).border = thin_border
             ws.cell(row=row, column=col).alignment = center_align
@@ -2466,9 +2465,9 @@ class LoudnessMeterApp(QMainWindow):
         # 最大真峰值
         tp_val = summary['max_true_peak']
         tp_limit = standard.true_peak_limit
-        tp_status = '合格' if tp_val <= tp_limit else '超标'
+        tp_status = self.tr('合格') if tp_val <= tp_limit else self.tr('超标')
         is_exceed = tp_status == '超标'
-        ws.cell(row=row, column=1, value='最大真峰值').font = normal_font
+        ws.cell(row=row, column=1, value=self.tr('最大真峰值')).font = normal_font
         ws.cell(row=row, column=2, value=f'{tp_val:+.2f}').font = red_font if is_exceed else normal_font
         ws.cell(row=row, column=3, value='dBTP').font = normal_font
         ws.cell(row=row, column=4, value=f'≤ {tp_limit:+.1f}').font = normal_font
@@ -2483,20 +2482,20 @@ class LoudnessMeterApp(QMainWindow):
         
         # 响度范围
         lra_val = summary['lra']
-        ws.cell(row=row, column=1, value='响度范围(LRA)').font = normal_font
+        ws.cell(row=row, column=1, value=self.tr('响度范围(LRA)')).font = normal_font
         ws.cell(row=row, column=2, value=f'{lra_val:.2f}').font = normal_font
         ws.cell(row=row, column=3, value='LU').font = normal_font
         ws.cell(row=row, column=4, value='-').font = normal_font
-        ws.cell(row=row, column=5, value='参考').font = normal_font
+        ws.cell(row=row, column=5, value=self.tr('参考')).font = normal_font
         for col in range(1, 6):
             ws.cell(row=row, column=col).border = thin_border
             ws.cell(row=row, column=col).alignment = center_align
         row += 1
         
         # 时长
-        ws.cell(row=row, column=1, value='测量时长').font = normal_font
+        ws.cell(row=row, column=1, value=self.tr('测量时长')).font = normal_font
         ws.cell(row=row, column=2, value=f"{summary['duration']:.2f}").font = normal_font
-        ws.cell(row=row, column=3, value='秒').font = normal_font
+        ws.cell(row=row, column=3, value=self.tr('秒')).font = normal_font
         ws.cell(row=row, column=4, value='-').font = normal_font
         ws.cell(row=row, column=5, value='-').font = normal_font
         for col in range(1, 6):
@@ -2509,12 +2508,12 @@ class LoudnessMeterApp(QMainWindow):
         # === 每秒短时响度 ===
         if detailed and detailed.get('short_term_per_second'):
             ws.merge_cells(f'A{row}:C{row}')
-            cell = ws.cell(row=row, column=1, value='每秒短时响度 (3秒滑动窗口)')
+            cell = ws.cell(row=row, column=1, value=self.tr('每秒短时响度 (3秒滑动窗口)'))
             cell.font = title_font
             cell.alignment = Alignment(horizontal='left', vertical='center')
             row += 2
             
-            st_headers = ['时间(秒)', '短时响度(LKFS)', '状态']
+            st_headers = [self.tr('时间(秒)'), self.tr('短时响度(LKFS)'), self.tr('状态')]
             for col, header in enumerate(st_headers, 1):
                 cell = ws.cell(row=row, column=col, value=header)
                 cell.font = header_font
@@ -2539,7 +2538,7 @@ class LoudnessMeterApp(QMainWindow):
                 if is_exceed:
                     lufs_cell.fill = exceed_fill
                 
-                status_cell = ws.cell(row=row, column=3, value='超标' if is_exceed else '合格')
+                status_cell = ws.cell(row=row, column=3, value=self.tr('超标') if is_exceed else self.tr('合格'))
                 status_cell.font = red_font if is_exceed else normal_font
                 status_cell.alignment = center_align
                 status_cell.border = thin_border
@@ -2587,7 +2586,7 @@ class LoudnessMeterApp(QMainWindow):
                 ws.cell(row=row, column=3).alignment = center_align
                 ws.cell(row=row, column=3).border = thin_border
                 
-                status_cell = ws.cell(row=row, column=4, value='超标' if is_exceed else '合格')
+                status_cell = ws.cell(row=row, column=4, value=self.tr('超标') if is_exceed else self.tr('合格'))
                 status_cell.font = red_font if is_exceed else normal_font
                 status_cell.alignment = center_align
                 status_cell.border = thin_border

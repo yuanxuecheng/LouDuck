@@ -17,6 +17,18 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Set
 import numpy as np
 
+try:
+    from PySide6.QtCore import QCoreApplication
+except ImportError:
+    QCoreApplication = None
+
+
+def _tr(context: str, text: str) -> str:
+    """翻译包装器，无 Qt 时回退原文"""
+    if QCoreApplication is not None:
+        return QCoreApplication.translate(context, text)
+    return text
+
 
 @dataclass
 class ADMTrack:
@@ -661,12 +673,17 @@ class ADM:
         """
         direct_speakers = self.get_channel_config()
         if not direct_speakers:
-            return 'unknown', 0.0, '未找到声床'
+            return 'unknown', 0.0, _tr('ADM', '未找到声床')
         
         return detect_config_by_features(direct_speakers)
     
-    def to_itu1770_config(self):
-        """转换为 ITU1770Meter 的 ChannelConfig"""
+    def to_itu1770_config(self, num_channels: Optional[int] = None):
+        """转换为 ITU1770Meter 的 ChannelConfig
+        
+        Args:
+            num_channels: BW64 文件实际音频通道数。若提供，会补齐缺失通道配置，
+                         避免 DirectSpeakers 数量与实际通道数不一致导致越界。
+        """
         from itu1770_meter import ChannelConfig
         
         adm_channels = self.get_channel_config()
@@ -699,48 +716,64 @@ class ADM:
                 is_lfe=ch.is_lfe
             ))
         
+        # 补齐缺失通道（Objects / HOA 等），确保配置长度与实际音频通道数一致
+        if num_channels is not None:
+            direct_count = len(result)
+            if direct_count < num_channels:
+                print(f"[ADM转换] 补齐 {num_channels - direct_count} 个非DirectSpeakers通道")
+                for i in range(direct_count, num_channels):
+                    result.append(ChannelConfig(
+                        name=f"Ch{i + 1}",
+                        azimuth=0.0,
+                        elevation=0.0,
+                        is_lfe=False
+                    ))
+            elif direct_count > num_channels:
+                print(f"[ADM转换] 警告: DirectSpeakers数量({direct_count})超过音频通道数({num_channels})，已截断")
+                result = result[:num_channels]
+        
         return result
     
     def get_renderer_summary(self) -> str:
         """获取渲染器信息摘要"""
         if not self.renderer_info:
-            return "未检测到渲染器信息"
+            return _tr('ADM', "未检测到渲染器信息")
         
         parts = []
         info = self.renderer_info
         if info.get('name'):
-            parts.append(f"名称: {info['name']}")
+            parts.append(_tr('ADM', "名称: {name}").format(name=info['name']))
         if info.get('version'):
-            parts.append(f"版本: {info['version']}")
+            parts.append(_tr('ADM', "版本: {version}").format(version=info['version']))
         if info.get('uri'):
             parts.append(f"URI: {info['uri']}")
         if info.get('coordinate_mode'):
-            parts.append(f"坐标模式: {info['coordinate_mode']}")
+            parts.append(_tr('ADM', "坐标模式: {mode}").format(mode=info['coordinate_mode']))
         if info.get('_inferred'):
-            parts.append("(基于内容推断)")
+            parts.append(_tr('ADM', "(基于内容推断)"))
         elif info.get('_source'):
             parts.append(f"({info['_source']})")
         
-        return " | ".join(parts) if parts else "渲染器信息不完整"
+        return " | ".join(parts) if parts else _tr('ADM', "渲染器信息不完整")
     
     def get_authoring_summary(self) -> str:
         """获取创作软件信息摘要"""
         if not self.authoring_info:
-            return "未检测到创作软件信息"
+            return _tr('ADM', "未检测到创作软件信息")
         
         parts = []
         info = self.authoring_info
         if info.get('reference_layouts'):
-            parts.append(f"参考布局: {', '.join(info['reference_layouts'])}")
+            parts.append(_tr('ADM', "参考布局: {layouts}").format(layouts=', '.join(info['reference_layouts'])))
         if info.get('renderers'):
             for r in info['renderers']:
-                name = r.get('name', '未知')
+                name = r.get('name', _tr('ADM', '未知'))
                 if r.get('_inferred'):
-                    parts.append(f"渲染器: {name} (推断)")
+                    parts.append(_tr('ADM', "渲染器: {name} (推断)").format(name=name))
                 else:
-                    parts.append(f"渲染器: {name}")
+                    parts.append(_tr('ADM', "渲染器: {name}").format(name=name))
         
-        return " | ".join(parts) if parts else "创作信息不完整"
+        return " | ".join(parts) if parts else _tr('ADM', "创作信息不完整")
     
     def _speaker_label_to_angles(self, label: str):
         """将扬声器标签转换为角度"""
