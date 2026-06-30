@@ -1559,7 +1559,7 @@ class LoudnessMeterApp(QMainWindow):
         right_info.setSpacing(0)
         right_info.setAlignment(Qt.AlignRight | Qt.AlignBottom)
         
-        version_label = QLabel('v1.0.1  (build 260622)')
+        version_label = QLabel('v1.0.3  (build 260630)')
         version_label.setStyleSheet('color: #667eea; font-size: 8px; border: none;')
         version_label.setAlignment(Qt.AlignRight)
         right_info.addWidget(version_label)
@@ -2696,7 +2696,7 @@ def _show_splash(app):
     painter.setPen(QColor("#667eea"))
     painter.setFont(QFont("Segoe UI", 10))
     fm = QFontMetrics(painter.font())
-    text = "v1.0.1  (build 260622)"
+    text = "v1.0.3  (build 260630)"
     x = card_x + (card_w - fm.horizontalAdvance(text)) // 2
     painter.drawText(x, card_y + 175, text)
 

@@ -46,12 +46,31 @@ jobs:
           cp -r LouDuck.app dmg_contents/
           ln -s /Applications dmg_contents/Applications
           
-          hdiutil create \
-            -volname "LouDuck" \
-            -srcfolder dmg_contents \
-            -ov \
-            -format UDZO \
-            LouDuck-macOS-AppleSilicon.dmg
+          # 清理可能残留的挂载卷和旧 DMG，避免 hdiutil "Resource busy"
+          hdiutil detach /Volumes/LouDuck -force || true
+          rm -f LouDuck-macOS-AppleSilicon.dmg
+          
+          # hdiutil 在 GitHub Actions 上偶尔不稳定，重试 3 次
+          for i in 1 2 3; do
+            echo "Attempt $i: creating DMG..."
+            if hdiutil create \
+              -volname "LouDuck" \
+              -srcfolder dmg_contents \
+              -ov \
+              -format UDZO \
+              LouDuck-macOS-AppleSilicon.dmg; then
+              break
+            fi
+            echo "DMG creation failed, retrying in 5s..."
+            sleep 5
+            hdiutil detach /Volumes/LouDuck -force || true
+          done
+          
+          # 确保 DMG 确实已生成
+          if [ ! -f LouDuck-macOS-AppleSilicon.dmg ]; then
+            echo "Error: DMG was not created after 3 attempts"
+            exit 1
+          fi
           
           rm -rf dmg_contents
       
