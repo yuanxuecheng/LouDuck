@@ -411,7 +411,7 @@ class DetailedMeasurementWorker(QThread):
                 mb_loaded = (f.tell() * bytes_per_frame) / (1024 * 1024)
                 mb_total = file_size / (1024 * 1024)
                 self.sub_step.emit(self.tr("加载中... {mb_loaded:.1f}/{mb_total:.1f} MB").format(mb_loaded=mb_loaded, mb_total=mb_total), int(progress))
-                yield chunk, sr
+                yield np.ascontiguousarray(chunk), sr
     
     def _iter_mono_files(self, mono_files):
         """流式读取多个单声道文件，返回 (sr, num_channels, total_samples, generator)"""
@@ -459,7 +459,7 @@ class DetailedMeasurementWorker(QThread):
                     if max_len == 0:
                         break
                     
-                    out = np.zeros((max_len, num_channels), dtype='float32')
+                    out = np.ascontiguousarray(np.zeros((max_len, num_channels), dtype='float32'))
                     for i, chunk in enumerate(chunks):
                         out[:len(chunk), i] = chunk
                     

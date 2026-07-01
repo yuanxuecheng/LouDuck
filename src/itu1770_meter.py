@@ -232,7 +232,7 @@ class ITU1770Meter:
         g = int(np.gcd(sr, target_sr))
         up = target_sr // g
         down = sr // g
-        return signal.resample_poly(chunk, up, down, axis=0)
+        return np.ascontiguousarray(signal.resample_poly(chunk, up, down, axis=0))
 
     def _k_weight_feed(self, chunk: np.ndarray) -> np.ndarray:
         """K-加权滤波（流式，状态保持）"""
@@ -240,7 +240,7 @@ class ITU1770Meter:
         filtered = np.empty_like(chunk, dtype=np.float64)
 
         for ch in range(num_channels):
-            x = chunk[:, ch].astype(np.float64)
+            x = np.ascontiguousarray(chunk[:, ch].astype(np.float64))
             y1, zf1 = signal.lfilter(
                 self.STAGE1_B, self.STAGE1_A, x, zi=self._zi_stage1[ch]
             )
@@ -455,10 +455,10 @@ class ITU1770Meter:
         if chunk is None or len(chunk) == 0:
             return
 
-        # 标准化输入维度
+        # 标准化输入维度，并确保 C-contiguous（避免 ARM64 等平台因内存布局触发 bus error）
         if chunk.ndim == 1:
             chunk = chunk.reshape(-1, 1)
-        chunk = np.asarray(chunk, dtype=np.float64)
+        chunk = np.ascontiguousarray(chunk, dtype=np.float64)
 
         # 防御性检查：chunk 通道数必须与初始化时的 channel_config 一致
         if chunk.shape[1] != len(self.channel_config):
@@ -564,7 +564,7 @@ class ITU1770Meter:
 
         if audio.ndim == 1:
             audio = audio.reshape(-1, 1)
-        audio = np.asarray(audio, dtype=np.float64)
+        audio = np.ascontiguousarray(audio, dtype=np.float64)
 
         total_samples = len(audio)
         chunk_samples = actual_sr  # 1 秒原始采样一块，与旧版 _resample_to_48k 分块一致

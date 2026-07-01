@@ -913,7 +913,7 @@ class BW64Parser:
         with sf.SoundFile(str(self.file_path), 'r') as f:
             sr = f.samplerate
             for chunk in f.blocks(blocksize=block_samples, dtype=dtype, always_2d=True):
-                yield chunk, sr
+                yield np.ascontiguousarray(chunk), sr
 
     def read_audio(self):
         """读取音频数据（一次性加载，小文件兼容接口）"""
