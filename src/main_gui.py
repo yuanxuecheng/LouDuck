@@ -404,13 +404,17 @@ class DetailedMeasurementWorker(QThread):
         
         with sf.SoundFile(file_path, 'r') as f:
             chunk_samples = sr  # 1 秒一块（按原始采样率）
+            last_percent = -1
             for chunk in f.blocks(blocksize=chunk_samples, dtype='float32', always_2d=True):
                 
                 progress = 5 + (f.tell() / total_samples) * 10
-                bytes_per_frame = file_size / total_samples if total_samples > 0 else 0
-                mb_loaded = (f.tell() * bytes_per_frame) / (1024 * 1024)
-                mb_total = file_size / (1024 * 1024)
-                self.sub_step.emit(self.tr("加载中... {mb_loaded:.1f}/{mb_total:.1f} MB").format(mb_loaded=mb_loaded, mb_total=mb_total), int(progress))
+                percent = int(progress)
+                if percent != last_percent:
+                    bytes_per_frame = file_size / total_samples if total_samples > 0 else 0
+                    mb_loaded = (f.tell() * bytes_per_frame) / (1024 * 1024)
+                    mb_total = file_size / (1024 * 1024)
+                    self.sub_step.emit(self.tr("加载中... {mb_loaded:.1f}/{mb_total:.1f} MB").format(mb_loaded=mb_loaded, mb_total=mb_total), percent)
+                    last_percent = percent
                 yield np.ascontiguousarray(chunk), sr
     
     def _iter_mono_files(self, mono_files):
@@ -463,8 +467,10 @@ class DetailedMeasurementWorker(QThread):
                     for i, chunk in enumerate(chunks):
                         out[:len(chunk), i] = chunk
                     
-                    progress = 7 + (chunk_idx * chunk_samples / max_samples) * 8
-                    self.sub_step.emit(self.tr("加载多单声道... {current}/{total}").format(current=chunk_idx+1, total=total_files), int(progress))
+                    # 限制进度条刷新频率，避免与测量阶段的进度回调交替导致 UI 闪切
+                    if chunk_idx % 10 == 0:
+                        progress = 7 + (chunk_idx * chunk_samples / max_samples) * 8
+                        self.sub_step.emit(self.tr("加载多单声道... {current}块").format(current=chunk_idx+1), int(progress))
                     chunk_idx += 1
                     
                     yield out, sr
@@ -1877,6 +1883,11 @@ class LoudnessMeterApp(QMainWindow):
         self.render_step_label.setText(self.tr("🎧 渲染完成"))
         self.render_progress.setValue(100)
         self.atmos_render_btn.setEnabled(True)
+        
+        # 短暂等待，确保 EAR 写入的临时文件完全落盘后再开始测量
+        # （Mac 上偶尔出现文件句柄/缓存未同步导致后续读取异常）
+        import time
+        time.sleep(0.5)
 
         # 保留 ADM 解析器与 UI，仅更新文件信息区域
         self.rendered_file = output_path
@@ -2768,6 +2779,11 @@ def ensure_single_instance(app):
 
 def main():
     import argparse
+    import faulthandler
+    # 启用 faulthandler，在 SIGBUS/SIGSEGV 等 C 层面崩溃时输出 traceback，
+    # 便于定位 Mac 上打包版闪退的根因。
+    faulthandler.enable()
+    
     parser = argparse.ArgumentParser()
     parser.add_argument('--lang', default=None, help='Force language, e.g. en, zh')
     args, remaining = parser.parse_known_args()
