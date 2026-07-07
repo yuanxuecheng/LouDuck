@@ -20,6 +20,24 @@ warnings.filterwarnings(
     module="ear.fileio.adm.timing_fixes",
 )
 
+import numpy as np
+
+# 修复 macOS Apple Silicon 上 numpy.linalg.inv 因输入数组非 C-contiguous
+# 或内存布局问题触发 SIGBUS / bus error 的问题（EAR 的 point_source.Triplet
+# 在初始化时会调用 np.linalg.inv(self.positions)）。
+_original_linalg_inv = np.linalg.inv
+
+
+def _safe_linalg_inv(a):
+    """包装 np.linalg.inv，确保输入为 C-contiguous float64 数组。"""
+    arr = np.asarray(a)
+    if arr.ndim == 2 and arr.shape[0] == arr.shape[1]:
+        arr = np.ascontiguousarray(arr, dtype=np.float64)
+    return _original_linalg_inv(arr)
+
+
+np.linalg.inv = _safe_linalg_inv
+
 from ear.cmdline.render_file import OfflineRenderDriver, PeakMonitor
 from ear.core.bs2051 import layout_names, get_layout
 from ear.fileio import openBw64, openBw64Adm
