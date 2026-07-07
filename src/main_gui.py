@@ -586,7 +586,9 @@ class ADMRenderWorker(QThread):
             src_dir = str(Path(__file__).parent)
             if src_dir not in sys.path:
                 sys.path.insert(0, src_dir)
+            print(f"[ADMRenderWorker] 开始导入 ear_renderer...")
             from renderers.ear_renderer import render_adm_with_progress
+            print(f"[ADMRenderWorker] ear_renderer 导入完成")
             
             # EAR 在产出第一个数据块前需要大量初始化（解析 ADM、构建渲染图等），
             # 提前 emit 初始化状态，避免进度条长时间停在 0% 看起来像卡死。
@@ -600,11 +602,13 @@ class ADMRenderWorker(QThread):
                 if not self._cancelled:
                     self.progress.emit(percent)
             
+            print(f"[ADMRenderWorker] 调用 render_adm_with_progress: {self.input_path} -> {self.target_layout}")
             output_path = render_adm_with_progress(
                 self.input_path,
                 self.target_layout,
                 progress_callback=on_progress,
             )
+            print(f"[ADMRenderWorker] render_adm_with_progress 返回: {output_path}")
             self.finished_signal.emit(output_path)
         except Exception as e:
             import traceback

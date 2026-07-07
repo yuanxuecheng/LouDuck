@@ -306,14 +306,23 @@ def render_adm_with_progress(
     )
 
     def _do_render(src_path: str, dst_path: str, total_samples: int) -> None:
+        print(f"[EAR渲染] 开始加载输出布局: {target_layout}")
         spkr_layout, upmix, n_channels = driver.load_output_layout()
+        print(f"[EAR渲染] 输出布局加载完成: {n_channels}ch")
+        
+        print(f"[EAR渲染] 打开 ADM/BW64 文件: {src_path}")
         output_monitor = PeakMonitor(n_channels)
 
         with openBw64Adm(src_path) as infile:
+            print(f"[EAR渲染] ADM 文件已打开，采样率={infile.sampleRate}Hz")
+            print(f"[EAR渲染] 开始 validate ADM...")
             infile.adm.validate()
+            print(f"[EAR渲染] ADM validate 完成")
+            print(f"[EAR渲染] 开始 check blockFormat timings...")
             timing_fixes.check_blockFormat_timings(
                 infile.adm, fix=driver.enable_block_duration_fix
             )
+            print(f"[EAR渲染] blockFormat timings 检查完成")
 
             samples_written = 0
             last_percent = -1
@@ -324,38 +333,53 @@ def render_adm_with_progress(
                 sampleRate=infile.sampleRate,
                 bitsPerSample=infile.bitdepth,
             )
+            print(f"[EAR渲染] 打开输出文件: {dst_path} ({n_channels}ch)")
             with openBw64(dst_path, "w", formatInfo=format_info) as outfile:
+                print(f"[EAR渲染] 开始 render_input_file 迭代...")
+                block_idx = 0
                 for output_block in driver.render_input_file(
                     infile, spkr_layout, upmix
                 ):
+                    if block_idx == 0:
+                        print(f"[EAR渲染] 第一个渲染块产出: shape={output_block.shape}")
                     output_monitor.process(output_block)
                     outfile.write(output_block)
+                    samples_written += output_block.shape[0]
+                    block_idx += 1
 
                     if progress_callback and total_samples > 0:
-                        samples_written += output_block.shape[0]
                         percent = min(100, int(samples_written / total_samples * 100))
                         if percent != last_percent:
                             progress_callback(percent)
                             last_percent = percent
 
+        print(f"[EAR渲染] 渲染迭代结束，共写出 {samples_written} 采样")
         output_monitor.warn_overloaded()
         if driver.fail_on_overload and output_monitor.has_overloaded():
             raise RuntimeError("输出过载：渲染后的音频出现了削波，请降低增益或检查输入电平。")
 
     # 用 soundfile 预先获取总样本数（Bw64AdmReader 没有 duration 属性）
+    print(f"[EAR渲染] 预读取文件信息: {input_path}")
     info = sf.info(input_path)
     total_samples = info.frames
+    print(f"[EAR渲染] 文件信息: {info.frames} frames, {info.channels} ch, {info.samplerate} Hz")
 
     # 策略 B：先尝试原始文件；若因 audioStreamFormat 双重引用失败，自动修复并重试
+    print(f"[EAR渲染] 开始策略B渲染...")
     try:
         _do_render(input_path, output_path, total_samples)
+        print(f"[EAR渲染] 原始文件渲染成功，输出: {output_path}")
         return output_path
     except Exception as first_err:
+        import traceback
+        print(f"[EAR渲染] 第一次渲染失败: {first_err}")
+        print(traceback.format_exc())
         err_msg = str(first_err)
         if "has a reference to both" in err_msg:
             fixed_path = _create_fixed_bw64(input_path)
             try:
                 _do_render(fixed_path, output_path, total_samples)
+                print(f"[EAR渲染] 修复后文件渲染成功，输出: {output_path}")
                 return output_path
             finally:
                 try:
