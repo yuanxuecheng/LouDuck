@@ -1867,7 +1867,10 @@ class LoudnessMeterApp(QMainWindow):
             num_objects = len([ch for ch in adm.channel_formats if ch.type == 'Objects'])
 
         # 启动后台渲染线程
+        # EAR 渲染初始化时会深度递归创建 point_source 对象，Mac 上 QThread
+        # 默认栈大小（约 512KB）容易导致栈溢出，显式设置为 8MB。
         self._render_worker = ADMRenderWorker(self.current_file, target_layout, num_objects=num_objects)
+        self._render_worker.setStackSize(8 * 1024 * 1024)
         self._render_worker.progress.connect(self._on_render_progress)
         self._render_worker.status.connect(self._on_render_status)
         self._render_worker.finished_signal.connect(self._on_render_finished)
@@ -2095,7 +2098,9 @@ class LoudnessMeterApp(QMainWindow):
         standard = self.current_standard
         
         # 创建并启动工作线程
+        # 测量过程涉及大量 numpy/scipy 运算，增大线程栈大小避免 Mac 上栈溢出。
         self.worker = DetailedMeasurementWorker(input_mode, input_data, config_name, standard)
+        self.worker.setStackSize(8 * 1024 * 1024)
         self.worker.sub_step.connect(self.on_sub_step)
         self.worker.finished_signal.connect(self.on_finished)
         self.worker.error.connect(self.on_error)
