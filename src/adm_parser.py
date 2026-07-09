@@ -825,6 +825,43 @@ class BW64Parser:
         self.audio_offset: int = 0
         self.audio_size: int = 0
     
+    def _read_ds64_size(self, f) -> Optional[int]:
+        """读取 ds64 chunk 中的 64 位 riffSize。
+        
+        BW64/RF64 大文件（>4GB）会在 32 位 file_size 字段使用 0xFFFFFFFF，
+        并在 ds64 chunk 中提供真正的 64 位文件大小。
+        返回 riffSize，如果没有 ds64 则返回 None。
+        """
+        start_pos = f.tell()
+        try:
+            while True:
+                chunk_id = f.read(4)
+                if len(chunk_id) < 4:
+                    break
+                chunk_size_bytes = f.read(4)
+                if len(chunk_size_bytes) < 4:
+                    break
+                chunk_size = struct.unpack('<I', chunk_size_bytes)[0]
+                
+                if chunk_id == b'ds64':
+                    # ds64 chunk layout:
+                    #   riffSize: uint64
+                    #   dataSize: uint64
+                    #   sampleCount: uint64
+                    #   tableLength: uint32
+                    #   table entries...
+                    riff_size = struct.unpack('<Q', f.read(8))[0]
+                    print(f"[BW64解析] 检测到 ds64 chunk，64 位文件大小: {riff_size}")
+                    return riff_size
+                
+                # 跳过当前 chunk（包括可能的填充字节）
+                f.seek(chunk_size + (chunk_size % 2), 1)
+        except Exception as e:
+            print(f"[BW64解析] 扫描 ds64 时出错: {e}")
+        finally:
+            f.seek(start_pos)
+        return None
+
     def parse(self) -> ADM:
         """解析 BW64 文件"""
         with open(self.file_path, 'rb') as f:
@@ -838,6 +875,15 @@ class BW64Parser:
             if wave_id not in (b'WAVE', b'BW64'):
                 raise ValueError(f"不是有效的 WAVE/BW64 格式: {wave_id}")
             
+            # 大文件支持：如果 32 位 file_size 为 0xFFFFFFFF 或文件标识为 BW64，
+            # 尝试从 ds64 chunk 读取 64 位真实文件大小。
+            if riff_id == b'BW64' or file_size == 0xFFFFFFFF:
+                ds64_size = self._read_ds64_size(f)
+                if ds64_size is not None:
+                    file_size = ds64_size
+            
+            print(f"[BW64解析] 文件大小: {file_size} bytes ({file_size / (1024**3):.2f} GB)")
+            
             while f.tell() < 8 + file_size:
                 chunk_id = f.read(4)
                 if len(chunk_id) < 4:
@@ -848,12 +894,21 @@ class BW64Parser:
                 except:
                     break
                 
+                # 大文件的 data chunk 也可能用 0xFFFFFFFF，其真实大小在 ds64 中
+                if chunk_id == b'data' and chunk_size == 0xFFFFFFFF:
+                    # 我们已经从 ds64 获取了 file_size；这里简单跳过到文件末尾
+                    print(f"[BW64解析] 跳过 64 位 data chunk")
+                    f.seek(file_size - (f.tell() - 8), 1)
+                    continue
+                
                 if chunk_id == self.CHUNK_ID_AXML:
+                    print(f"[BW64解析] 读取 axml chunk，大小: {chunk_size} bytes")
                     self.axml_data = f.read(chunk_size)
                     if chunk_size % 2:
                         f.read(1)
                 
                 elif chunk_id == self.CHUNK_ID_CHNA:
+                    print(f"[BW64解析] 读取 chna chunk，大小: {chunk_size} bytes")
                     self.chna_data = f.read(chunk_size)
                     if chunk_size % 2:
                         f.read(1)
@@ -878,6 +933,8 @@ class BW64Parser:
         if self.axml_data:
             self.adm = ADM(self.axml_data, self.chna_data)
             self.adm.parse()
+        else:
+            print(f"[BW64解析] 警告: 未找到 axml chunk")
         
         return self.adm
     
