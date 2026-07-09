@@ -1507,8 +1507,10 @@ class LoudnessMeterApp(QMainWindow):
                     self.current_adm_parser = BW64Parser(path)
                     self.current_adm_parser.parse()
                     self.parse_and_display_adm(path)
-            except Exception:
-                pass
+            except Exception as e:
+                import traceback
+                print(f"[ADM自动检测错误] {path}: {e}")
+                print(traceback.format_exc())
 
         cfg_map = {2: 'stereo', 6: '5.1', 8: '7.1', 10: '5.1.4', 12: '7.1.4'}
         if info.channels in cfg_map:

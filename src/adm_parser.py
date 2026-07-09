@@ -979,6 +979,32 @@ class BW64Parser:
         return data, sr
 
 
+def _scan_for_axml(f, file_size: int) -> bool:
+    """在 WAVE/BW64 chunk 中扫描 axml chunk。"""
+    try:
+        while f.tell() < 8 + file_size:
+            chunk_id = f.read(4)
+            if len(chunk_id) < 4:
+                break
+            if chunk_id == b'axml':
+                return True
+            try:
+                chunk_size_bytes = f.read(4)
+                if len(chunk_size_bytes) < 4:
+                    break
+                chunk_size = struct.unpack('<I', chunk_size_bytes)[0]
+                # 大文件的 data chunk 可能使用 0xFFFFFFFF；ds64 中已有真实大小，
+                # 但 axml 通常在 data 之前，因此这里直接退出扫描。
+                if chunk_id == b'data' and chunk_size == 0xFFFFFFFF:
+                    break
+                f.seek(chunk_size + (chunk_size % 2), 1)
+            except:
+                break
+    except Exception as e:
+        print(f"[is_adm_file] 扫描 axml 出错: {e}")
+    return False
+
+
 def is_adm_file(file_path: str) -> bool:
     """检查文件是否为 ADM/BW64 格式"""
     path = Path(file_path)
@@ -989,23 +1015,50 @@ def is_adm_file(file_path: str) -> bool:
     try:
         with open(path, 'rb') as f:
             header = f.read(12)
-            if header[:4] == b'BW64':
+            riff_id = header[:4]
+            if riff_id == b'BW64':
                 return True
             
-            if header[:4] == b'RIFF' and header[8:12] == b'WAVE':
+            if riff_id == b'RIFF' and header[8:12] == b'WAVE':
+                file_size = struct.unpack('<I', header[4:8])[0]
+                
+                # 大文件：32 位 size 为 0xFFFFFFFF，需要从 ds64 读取 64 位大小
+                if file_size == 0xFFFFFFFF:
+                    f.seek(12)
+                    ds64_size = _read_ds64_size_static(f)
+                    if ds64_size is not None:
+                        file_size = ds64_size
+                    else:
+                        print(f"[is_adm_file] 警告: 大文件但未找到 ds64 chunk")
+                
                 f.seek(12)
-                while True:
-                    chunk_id = f.read(4)
-                    if len(chunk_id) < 4:
-                        break
-                    if chunk_id == b'axml':
-                        return True
-                    try:
-                        chunk_size = struct.unpack('<I', f.read(4))[0]
-                        f.seek(chunk_size + (chunk_size % 2), 1)
-                    except:
-                        break
-    except:
-        pass
+                return _scan_for_axml(f, file_size)
+    except Exception as e:
+        print(f"[is_adm_file] 检查失败: {e}")
     
     return False
+
+
+def _read_ds64_size_static(f) -> Optional[int]:
+    """静态版本：读取 ds64 chunk 中的 riffSize。"""
+    start_pos = f.tell()
+    try:
+        while True:
+            chunk_id = f.read(4)
+            if len(chunk_id) < 4:
+                break
+            chunk_size_bytes = f.read(4)
+            if len(chunk_size_bytes) < 4:
+                break
+            chunk_size = struct.unpack('<I', chunk_size_bytes)[0]
+            
+            if chunk_id == b'ds64':
+                riff_size = struct.unpack('<Q', f.read(8))[0]
+                return riff_size
+            
+            f.seek(chunk_size + (chunk_size % 2), 1)
+    except Exception:
+        pass
+    finally:
+        f.seek(start_pos)
+    return None
