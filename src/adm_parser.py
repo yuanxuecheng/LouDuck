@@ -824,13 +824,15 @@ class BW64Parser:
         self.adm: Optional[ADM] = None
         self.audio_offset: int = 0
         self.audio_size: int = 0
+        self.ds64_info: Optional[Dict[str, int]] = None
     
-    def _read_ds64_size(self, f) -> Optional[int]:
-        """读取 ds64 chunk 中的 64 位 riffSize。
+    def _read_ds64(self, f) -> Optional[Dict[str, int]]:
+        """读取 ds64 chunk 中的 64 位大小信息。
         
         BW64/RF64 大文件（>4GB）会在 32 位 file_size 字段使用 0xFFFFFFFF，
-        并在 ds64 chunk 中提供真正的 64 位文件大小。
-        返回 riffSize，如果没有 ds64 则返回 None。
+        并在 ds64 chunk 中提供真正的 64 位文件大小与 data chunk 大小。
+        返回 {'riff_size': int, 'data_size': int, 'sample_count': int}，
+        如果没有 ds64 则返回 None。
         """
         start_pos = f.tell()
         try:
@@ -851,8 +853,14 @@ class BW64Parser:
                     #   tableLength: uint32
                     #   table entries...
                     riff_size = struct.unpack('<Q', f.read(8))[0]
-                    print(f"[BW64解析] 检测到 ds64 chunk，64 位文件大小: {riff_size}")
-                    return riff_size
+                    data_size = struct.unpack('<Q', f.read(8))[0]
+                    sample_count = struct.unpack('<Q', f.read(8))[0]
+                    print(f"[BW64解析] 检测到 ds64 chunk，riffSize={riff_size}, dataSize={data_size}, sampleCount={sample_count}")
+                    return {
+                        'riff_size': riff_size,
+                        'data_size': data_size,
+                        'sample_count': sample_count
+                    }
                 
                 # 跳过当前 chunk（包括可能的填充字节）
                 f.seek(chunk_size + (chunk_size % 2), 1)
@@ -861,13 +869,25 @@ class BW64Parser:
         finally:
             f.seek(start_pos)
         return None
+    
+    def _read_ds64_size(self, f) -> Optional[int]:
+        """读取 ds64 chunk 中的 64 位 riffSize（兼容接口）。
+        
+        内部调用 _read_ds64 获取完整 ds64 信息，仅返回 riffSize。
+        """
+        ds64_info = self._read_ds64(f)
+        return ds64_info['riff_size'] if ds64_info else None
 
     def parse(self) -> ADM:
-        """解析 BW64 文件"""
+        """解析 BW64/RF64 文件"""
+        actual_size = self.file_path.stat().st_size
+        truncated = False
+        truncated_missing = 0
+
         with open(self.file_path, 'rb') as f:
             riff_id = f.read(4)
-            if riff_id not in (b'RIFF', b'BW64'):
-                raise ValueError(f"不是有效的 RIFF/BW64 文件: {riff_id}")
+            if riff_id not in (b'RIFF', b'BW64', b'RF64'):
+                raise ValueError(f"不是有效的 RIFF/BW64/RF64 文件: {riff_id}")
             
             file_size = struct.unpack('<I', f.read(4))[0]
             wave_id = f.read(4)
@@ -875,31 +895,43 @@ class BW64Parser:
             if wave_id not in (b'WAVE', b'BW64'):
                 raise ValueError(f"不是有效的 WAVE/BW64 格式: {wave_id}")
             
-            # 大文件支持：如果 32 位 file_size 为 0xFFFFFFFF 或文件标识为 BW64，
-            # 尝试从 ds64 chunk 读取 64 位真实文件大小。
-            if riff_id == b'BW64' or file_size == 0xFFFFFFFF:
-                ds64_size = self._read_ds64_size(f)
-                if ds64_size is not None:
-                    file_size = ds64_size
+            # 大文件支持：BW64/RF64 的 32 位 file_size 通常为 0xFFFFFFFF，
+            # 需要从 ds64 chunk 读取 64 位真实文件大小与 data chunk 大小。
+            if riff_id in (b'BW64', b'RF64') or file_size == 0xFFFFFFFF:
+                self.ds64_info = self._read_ds64(f)
+                if self.ds64_info is not None:
+                    file_size = self.ds64_info['riff_size']
             
-            print(f"[BW64解析] 文件大小: {file_size} bytes ({file_size / (1024**3):.2f} GB)")
+            print(f"[BW64解析] 文件大小: {file_size} bytes ({file_size / (1024**3):.2f} GB), 实际大小: {actual_size} bytes ({actual_size / (1024**3):.2f} GB)")
             
-            while f.tell() < 8 + file_size:
+            if file_size > 0 and 8 + file_size > actual_size:
+                truncated = True
+                truncated_missing = (8 + file_size) - actual_size
+                print(f"[BW64解析] 警告: 声明文件大小大于实际文件大小 {truncated_missing} bytes，文件可能被截断")
+            
+            # 使用实际文件大小作为扫描上限，避免在截断文件上越界
+            scan_end = min(8 + file_size, actual_size) if file_size > 0 else actual_size
+            
+            while f.tell() < scan_end:
                 chunk_id = f.read(4)
                 if len(chunk_id) < 4:
                     break
                 
                 try:
-                    chunk_size = struct.unpack('<I', f.read(4))[0]
-                except:
+                    chunk_size_bytes = f.read(4)
+                    if len(chunk_size_bytes) < 4:
+                        break
+                    chunk_size = struct.unpack('<I', chunk_size_bytes)[0]
+                except Exception:
                     break
                 
-                # 大文件的 data chunk 也可能用 0xFFFFFFFF，其真实大小在 ds64 中
-                if chunk_id == b'data' and chunk_size == 0xFFFFFFFF:
-                    # 我们已经从 ds64 获取了 file_size；这里简单跳过到文件末尾
-                    print(f"[BW64解析] 跳过 64 位 data chunk")
-                    f.seek(file_size - (f.tell() - 8), 1)
-                    continue
+                remaining = actual_size - f.tell()
+                
+                # 防止被截断文件中的超大 chunk_size 导致越界
+                if chunk_size > remaining:
+                    print(f"[BW64解析] 警告: chunk {chunk_id!r} 声明大小 {chunk_size} 超过剩余字节 {remaining}，文件可能截断")
+                    truncated = True
+                    break
                 
                 if chunk_id == self.CHUNK_ID_AXML:
                     print(f"[BW64解析] 读取 axml chunk，大小: {chunk_size} bytes")
@@ -921,9 +953,22 @@ class BW64Parser:
                 
                 elif chunk_id == b'data':
                     self.audio_offset = f.tell()
-                    self.audio_size = chunk_size
-                    f.seek(chunk_size, 1)
-                    if chunk_size % 2:
+                    # RF64/BW64 大文件的 data chunk 大小可能为 0xFFFFFFFF，
+                    # 真实大小在 ds64 的 data_size 中。使用 data_size 跳过数据块，
+                    # 而不是跳到文件末尾，因为 axml/chna 等元数据可能在 data 之后。
+                    if chunk_size == 0xFFFFFFFF and self.ds64_info is not None:
+                        actual_data_size = self.ds64_info['data_size']
+                        print(f"[BW64解析] 64 位 data chunk，使用 ds64 dataSize: {actual_data_size} bytes")
+                    else:
+                        actual_data_size = chunk_size
+                    self.audio_size = actual_data_size
+                    # 跳过数据块；截断保护
+                    skip_size = min(actual_data_size, remaining)
+                    if skip_size < actual_data_size:
+                        print(f"[BW64解析] 警告: data chunk 声明大小 {actual_data_size} 超过剩余字节 {remaining}，只跳过可用部分")
+                        truncated = True
+                    f.seek(skip_size, 1)
+                    if skip_size % 2:
                         f.read(1)
                 else:
                     f.seek(chunk_size, 1)
@@ -934,7 +979,10 @@ class BW64Parser:
             self.adm = ADM(self.axml_data, self.chna_data)
             self.adm.parse()
         else:
-            print(f"[BW64解析] 警告: 未找到 axml chunk")
+            if truncated:
+                print(f"[BW64解析] 警告: 未找到 axml chunk；文件被截断（缺少约 {truncated_missing} bytes），ADM 元数据可能位于缺失部分")
+            else:
+                print(f"[BW64解析] 警告: 未找到 axml chunk，该文件不是 ADM/BW64 格式")
         
         return self.adm
     
@@ -979,48 +1027,67 @@ class BW64Parser:
         return data, sr
 
 
-def _scan_for_axml(f, file_size: int) -> bool:
-    """在 WAVE/BW64 chunk 中扫描 axml chunk。"""
+def _scan_for_axml(f, file_size: int, actual_size: int) -> Tuple[bool, Optional[str]]:
+    """在 WAVE/BW64 chunk 中扫描 axml chunk。
+    
+    返回 (是否找到 axml, 失败原因或 None)
+    """
+    scan_end = min(8 + file_size, actual_size)
     try:
-        while f.tell() < 8 + file_size:
+        while f.tell() < scan_end:
             chunk_id = f.read(4)
             if len(chunk_id) < 4:
+                if f.tell() >= actual_size:
+                    return False, "已到达实际文件末尾，未找到 axml"
                 break
             if chunk_id == b'axml':
-                return True
+                return True, None
             try:
                 chunk_size_bytes = f.read(4)
                 if len(chunk_size_bytes) < 4:
-                    break
+                    return False, "块大小读取失败"
                 chunk_size = struct.unpack('<I', chunk_size_bytes)[0]
                 # 大文件的 data chunk 可能使用 0xFFFFFFFF；ds64 中已有真实大小，
                 # 但 axml 通常在 data 之前，因此这里直接退出扫描。
                 if chunk_id == b'data' and chunk_size == 0xFFFFFFFF:
-                    break
+                    return False, "遇到 64 位 data chunk，axml 通常在此之前"
+                # 防止被截断文件中的超大 chunk_size 导致越界扫描
+                remaining = actual_size - f.tell()
+                if chunk_size > remaining:
+                    truncated_missing = (8 + file_size) - actual_size if file_size > 0 else 0
+                    msg = f"文件可能被截断：chunk {chunk_id!r} 声明大小 {chunk_size} 超过剩余字节 {remaining}"
+                    if truncated_missing > 0:
+                        msg += f"，声明文件大小比实际文件大小大 {truncated_missing} bytes"
+                    return False, msg
                 f.seek(chunk_size + (chunk_size % 2), 1)
-            except:
-                break
+            except Exception as e:
+                return False, f"扫描块时出错: {e}"
     except Exception as e:
-        print(f"[is_adm_file] 扫描 axml 出错: {e}")
-    return False
+        return False, f"[is_adm_file] 扫描 axml 出错: {e}"
+    return False, "已扫描完整文件，未找到 axml chunk"
 
 
 def is_adm_file(file_path: str) -> bool:
-    """检查文件是否为 ADM/BW64 格式"""
+    """检查文件是否为 ADM/BW64/RF64 格式"""
     path = Path(file_path)
+    print(f"[is_adm_file] 被调用: {file_path}, 扩展名: {path.suffix}", flush=True)
     
     if path.suffix.lower() in ['.bw64', '.bwf', '.adm']:
+        print(f"[is_adm_file] 扩展名匹配，直接返回 True", flush=True)
         return True
     
     try:
+        actual_size = path.stat().st_size
         with open(path, 'rb') as f:
             header = f.read(12)
             riff_id = header[:4]
-            if riff_id == b'BW64':
+            declared_size = struct.unpack('<I', header[4:8])[0]
+            print(f"[is_adm_file] 文件头: {riff_id}, format: {header[8:12]}, 32位size: {declared_size}, 实际大小: {actual_size}", flush=True)
+            if riff_id in (b'BW64', b'RF64'):
                 return True
             
             if riff_id == b'RIFF' and header[8:12] == b'WAVE':
-                file_size = struct.unpack('<I', header[4:8])[0]
+                file_size = declared_size
                 
                 # 大文件：32 位 size 为 0xFFFFFFFF，需要从 ds64 读取 64 位大小
                 if file_size == 0xFFFFFFFF:
@@ -1029,13 +1096,30 @@ def is_adm_file(file_path: str) -> bool:
                     if ds64_size is not None:
                         file_size = ds64_size
                     else:
-                        print(f"[is_adm_file] 警告: 大文件但未找到 ds64 chunk")
+                        print(f"[is_adm_file] 警告: 大文件但未找到 ds64 chunk，按 4GB 处理", flush=True)
+                
+                # 检测文件截断
+                truncated = file_size > 0 and 8 + file_size > actual_size
+                if truncated:
+                    missing = (8 + file_size) - actual_size
+                    print(f"[is_adm_file] 警告: 声明文件大小 ({8 + file_size}) 大于实际文件大小 ({actual_size})，可能缺少 {missing} bytes 数据", flush=True)
                 
                 f.seek(12)
-                return _scan_for_axml(f, file_size)
+                result, reason = _scan_for_axml(f, file_size, actual_size)
+                if result:
+                    print(f"[is_adm_file] _scan_for_axml 返回: True", flush=True)
+                else:
+                    print(f"[is_adm_file] _scan_for_axml 返回: False, 原因: {reason}", flush=True)
+                    # 文件被截断且无法找到 ADM 元数据时，抛出明确异常，供 GUI 提示用户
+                    if truncated:
+                        raise ValueError(reason or "文件不完整，无法找到 ADM 元数据")
+                return result
     except Exception as e:
-        print(f"[is_adm_file] 检查失败: {e}")
+        print(f"[is_adm_file] 检查失败: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
     
+    print(f"[is_adm_file] 最终返回 False", flush=True)
     return False
 
 

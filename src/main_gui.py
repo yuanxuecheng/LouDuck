@@ -632,6 +632,8 @@ class LoudnessMeterApp(QMainWindow):
         self.mono_files = None
         self.current_standard = LOUDNESS_STANDARDS["GY/T 282-2014 (中国广电-电视)"]
         self.worker = None
+        self._rendering_in_progress = False
+        self._original_adm_file = None
         
         # 启用拖放
         self.setAcceptDrops(True)
@@ -1511,6 +1513,10 @@ class LoudnessMeterApp(QMainWindow):
                 import traceback
                 print(f"[ADM自动检测错误] {path}: {e}")
                 print(traceback.format_exc())
+                QMessageBox.warning(
+                    self, self.tr("ADM 检测失败"),
+                    self.tr("无法检测 ADM 元数据:\n{err}").format(err=str(e))
+                )
 
         cfg_map = {2: 'stereo', 6: '5.1', 8: '7.1', 10: '5.1.4', 12: '7.1.4'}
         if info.channels in cfg_map:
@@ -1571,7 +1577,7 @@ class LoudnessMeterApp(QMainWindow):
         right_info.setSpacing(0)
         right_info.setAlignment(Qt.AlignRight | Qt.AlignBottom)
         
-        version_label = QLabel('v1.0.4  (build 260709)')
+        version_label = QLabel('v1.0.5  (build 260804)')
         version_label.setStyleSheet('color: #667eea; font-size: 8px; border: none;')
         version_label.setAlignment(Qt.AlignRight)
         right_info.addWidget(version_label)
@@ -1817,6 +1823,8 @@ class LoudnessMeterApp(QMainWindow):
         self.mono_files = None
         self.current_adm_parser = None
         self.rendered_file = None
+        self._original_adm_file = None
+        self._rendering_in_progress = False
 
         if hasattr(self, 'filename_label'):
             self.filename_label.setText(self.tr("未选择文件"))
@@ -1853,8 +1861,14 @@ class LoudnessMeterApp(QMainWindow):
             QMessageBox.information(self, self.tr("提示"), self.tr("该文件不包含动态对象音频，无需渲染。"))
             return
 
-        # 禁用渲染按钮防止重复点击
+        # 禁用渲染按钮防止重复点击，并记录原始 ADM 路径
+        self._original_adm_file = self.current_file
+        self._rendering_in_progress = True
         self.atmos_render_btn.setEnabled(False)
+        self.atmos_render_btn.setText(self.tr("🎯 渲染中..."))
+        self.start_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self.stop_btn.setText(self.tr("⏹ 停止渲染"))
 
         # 显示渲染进度条
         self.render_step_label.setText(self.tr("🎧 正在渲染到 {layout}...").format(layout=target_layout))
@@ -1891,7 +1905,10 @@ class LoudnessMeterApp(QMainWindow):
         """渲染完成，保留 ADM UI 信息，仅更新文件信息为渲染后的文件"""
         self.render_step_label.setText(self.tr("🎧 渲染完成"))
         self.render_progress.setValue(100)
+        self._rendering_in_progress = False
         self.atmos_render_btn.setEnabled(True)
+        self.atmos_render_btn.setText(self.tr("🎯 渲染并测量"))
+        self.stop_btn.setText(self.tr("⏹ 停止测量"))
         
         # 短暂等待，确保 EAR 写入的临时文件完全落盘后再开始测量
         # （Mac 上偶尔出现文件句柄/缓存未同步导致后续读取异常）
@@ -1908,6 +1925,20 @@ class LoudnessMeterApp(QMainWindow):
         self._update_file_metadata(output_path)
         self._update_channel_order(output_path)
 
+        # 同时显示原始 ADM 文件大小和渲染后文件大小
+        if self._original_adm_file and Path(self._original_adm_file).exists():
+            original_size = Path(self._original_adm_file).stat().st_size
+            rendered_size = Path(output_path).stat().st_size
+            self.file_meta_labels['file_size'].setText(
+                self.tr("渲染: {rendered}\n原始: {original}").format(
+                    rendered=self._format_file_size(rendered_size),
+                    original=self._format_file_size(original_size)
+                )
+            )
+            self.file_meta_labels['file_size'].setStyleSheet(
+                "color: #eee; font-size: 11px; font-weight: bold;"
+            )
+
         # 自动设置声道配置
         cfg_map = {"Stereo (2.0)": "stereo", "5.1 (6ch)": "5.1", "7.1 (8ch)": "7.1",
                    "5.1.4 (10ch)": "5.1.4", "7.1.4 (12ch)": "7.1.4", "9.1.6 (16ch)": "9.1.6"}
@@ -1919,10 +1950,15 @@ class LoudnessMeterApp(QMainWindow):
 
     def _on_render_error(self, error_msg: str):
         """渲染出错"""
+        self._rendering_in_progress = False
         self.render_step_label.setText(self.tr("🎧 渲染失败"))
         self.render_progress.setValue(0)
         self.render_progress.setVisible(False)
         self.atmos_render_btn.setEnabled(True)
+        self.atmos_render_btn.setText(self.tr("🎯 渲染并测量"))
+        self.start_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.setText(self.tr("⏹ 停止测量"))
         QMessageBox.critical(self, self.tr("渲染失败"), self.tr("渲染过程中出错:\n{err}").format(err=error_msg))
 
     def browse(self):
@@ -1954,11 +1990,36 @@ class LoudnessMeterApp(QMainWindow):
             self._update_channel_order(path)
 
             # 检查是否为 ADM/BW64（自动检测）
-            if is_adm_file(path):
-                self.current_adm_parser = BW64Parser(path)
-                self.current_adm_parser.parse()
-                self.parse_and_display_adm(path)
-                self._update_mode_ui('file')  # 刷新 ADM 区域显隐
+            print(f"[browse] 开始 ADM 检测: {path}", flush=True)
+            is_adm = False
+            try:
+                is_adm = is_adm_file(path)
+                print(f"[browse] is_adm_file 返回: {is_adm}", flush=True)
+            except Exception as adm_err:
+                print(f"[browse] is_adm_file 异常: {adm_err}", flush=True)
+                import traceback
+                traceback.print_exc()
+                QMessageBox.warning(
+                    self, self.tr("ADM 检测失败"),
+                    self.tr("无法检测 ADM 元数据:\n{err}").format(err=str(adm_err))
+                )
+
+            if is_adm:
+                print(f"[browse] 开始解析 ADM...", flush=True)
+                try:
+                    self.current_adm_parser = BW64Parser(path)
+                    self.current_adm_parser.parse()
+                    self.parse_and_display_adm(path)
+                    self._update_mode_ui('file')  # 刷新 ADM 区域显隐
+                    print(f"[browse] ADM 解析完成", flush=True)
+                except Exception as parse_err:
+                    print(f"[browse] ADM 解析失败: {parse_err}", flush=True)
+                    import traceback
+                    traceback.print_exc()
+                    QMessageBox.warning(
+                        self, self.tr("ADM 解析失败"),
+                        self.tr("文件被识别为 ADM/BW64，但解析元数据时出错:\n{err}").format(err=str(parse_err))
+                    )
 
             cfg_map = {2: 'stereo', 6: '5.1', 8: '7.1', 10: '5.1.4', 12: '7.1.4'}
             if info.channels in cfg_map:
@@ -2183,7 +2244,11 @@ class LoudnessMeterApp(QMainWindow):
             self.loudness_curve.set_data(curve_data, duration, std.integrated_target)
 
     def stop_measure(self):
-        """停止当前测量线程"""
+        """停止当前测量线程；若正在渲染 ADM，则停止渲染"""
+        if self._rendering_in_progress:
+            self._stop_render()
+            return
+
         if self.worker and self.worker.isRunning():
             self.worker.requestInterruption()
             if not self.worker.wait(3000):
@@ -2193,6 +2258,22 @@ class LoudnessMeterApp(QMainWindow):
             self.progress.setVisible(False)
             self.start_btn.setEnabled(True)
             self.stop_btn.setEnabled(False)
+
+    def _stop_render(self):
+        """停止 ADM 渲染线程并恢复按钮状态"""
+        self._rendering_in_progress = False
+        if self._render_worker and self._render_worker.isRunning():
+            self._render_worker.cancel()
+            if not self._render_worker.wait(3000):
+                self._render_worker.terminate()
+            self._render_worker = None
+        self.render_step_label.setText(self.tr("渲染已停止"))
+        self.render_progress.setVisible(False)
+        self.atmos_render_btn.setEnabled(True)
+        self.atmos_render_btn.setText(self.tr("🎯 渲染并测量"))
+        self.start_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.setText(self.tr("⏹ 停止测量"))
 
     def clear_results(self):
         """清空右侧结果数据"""
@@ -2718,7 +2799,7 @@ def _show_splash(app):
     painter.setPen(QColor("#667eea"))
     painter.setFont(QFont("Segoe UI", 10))
     fm = QFontMetrics(painter.font())
-    text = "v1.0.4  (build 260630)"
+    text = "v1.0.5  (build 260804)"
     x = card_x + (card_w - fm.horizontalAdvance(text)) // 2
     painter.drawText(x, card_y + 175, text)
 

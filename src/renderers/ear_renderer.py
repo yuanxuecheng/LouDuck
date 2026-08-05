@@ -98,60 +98,222 @@ def _fix_adm_xml(axml_data: bytes) -> bytes:
     return xml_str.encode('utf-8')
 
 
-def _create_fixed_bw64(input_path: str) -> str:
+def _create_fixed_bw64(input_path: str, progress_callback=None) -> str:
     """
-    复制 BW64/RIFF 文件，修复 axml chunk 中的 audioStreamFormat 双重引用。
+    复制 BW64/RIFF/RF64 文件，修复 axml chunk 中的 audioStreamFormat 双重引用。
+
+    关键点：
+    - 不一次性把整个文件读入内存，使用流式 I/O，支持 >4GB 的大文件。
+    - 支持 BW64/RF64 格式和 ds64 chunk，正确识别 0xFFFFFFFF 的 64 位 data chunk。
+    - 保留原文件中的 fmt、chna 以及其他辅助 chunk，只替换 axml。
+    - 流式复制音频数据并可选调用 progress_callback(0-100)。
+
     返回临时文件路径。
     """
-    with open(input_path, 'rb') as f:
-        data = bytearray(f.read())
+    input_path = Path(input_path)
+    temp_path = Path(tempfile.gettempdir()) / f"fixed_{input_path.name}"
+    file_size = input_path.stat().st_size
 
-    # 遍历 RIFF chunk 找到 axml
-    pos = 12  # 跳过 12 字节 BW64/RIFF header
-    axml_data_pos = None
-    axml_data_size = None
+    # ---------------- 阶段 1：扫描所有 chunk，记录位置与大小 ----------------
+    chunks = []
+    ds64_info = None
+    is_rf64 = False
 
-    while pos < len(data):
-        chunk_id = data[pos:pos + 4]
-        if len(chunk_id) < 4:
-            break
-        chunk_size = struct.unpack('<I', data[pos + 4:pos + 8])[0]
+    with open(input_path, 'rb') as src:
+        header = src.read(12)
+        if len(header) < 12:
+            raise ValueError("文件头不完整")
 
-        if chunk_id == b'axml':
-            axml_data_pos = pos + 8
-            axml_data_size = chunk_size
-            break
+        riff_id = header[0:4]
+        file_size_32 = struct.unpack('<I', header[4:8])[0]
+        wave_id = header[8:12]
 
-        pos += 8 + chunk_size + (chunk_size % 2)
+        if riff_id not in (b'RIFF', b'BW64', b'RF64'):
+            raise ValueError(f"不是有效的 RIFF/BW64/RF64 文件: {riff_id!r}")
+        if wave_id not in (b'WAVE', b'BW64'):
+            raise ValueError(f"不是有效的 WAVE/BW64 格式: {wave_id!r}")
 
-    if axml_data_pos is None:
+        is_rf64 = (riff_id in (b'BW64', b'RF64')) or (file_size_32 == 0xFFFFFFFF)
+
+        pos = 12
+        while pos < file_size:
+            src.seek(pos)
+            chunk_id = src.read(4)
+            if len(chunk_id) < 4:
+                break
+
+            chunk_size_bytes = src.read(4)
+            if len(chunk_size_bytes) < 4:
+                break
+            chunk_size = struct.unpack('<I', chunk_size_bytes)[0]
+            chunk_data_pos = pos + 8
+
+            # 用于后续计算位置的真实大小；64 位占位符会在下面替换
+            real_chunk_size = chunk_size
+
+            if chunk_id == b'ds64':
+                try:
+                    riff_size_64 = struct.unpack('<Q', src.read(8))[0]
+                    data_size_64 = struct.unpack('<Q', src.read(8))[0]
+                    sample_count_64 = struct.unpack('<Q', src.read(8))[0]
+                    table_length = struct.unpack('<I', src.read(4))[0]
+                except struct.error as e:
+                    raise ValueError(f"ds64 chunk 格式错误: {e}")
+                ds64_info = {
+                    'riff_size': riff_size_64,
+                    'data_size': data_size_64,
+                    'sample_count': sample_count_64,
+                    'table_length': table_length,
+                }
+
+            # RF64/BW64 大文件的 data chunk 可能用 0xFFFFFFFF 占位，
+            # 真实大小存储在 ds64 chunk 中。必须正确跳过数据块，
+            # 否则后续（如 data 之后的 axml）会被漏扫。
+            if chunk_id == b'data' and chunk_size == 0xFFFFFFFF:
+                if ds64_info is None:
+                    raise ValueError("64 位 data chunk 缺少 ds64 信息")
+                real_chunk_size = ds64_info['data_size']
+                print(f"[EAR修复] 64 位 data chunk，使用 ds64 data_size: {real_chunk_size}")
+
+            chunks.append({
+                'id': chunk_id,
+                'pos': pos,
+                'size': chunk_size,
+                'data_pos': chunk_data_pos,
+                'real_size': real_chunk_size,
+            })
+
+            padded_size = real_chunk_size + (real_chunk_size % 2)
+            next_pos = chunk_data_pos + padded_size
+            if next_pos <= pos:
+                # 防止病态的 0xFFFFFFFF 导致死循环；安全退出
+                print(f"[EAR修复] 警告: chunk {chunk_id!r} 导致位置未前进，停止扫描")
+                break
+            pos = next_pos
+
+    axml_chunk = next((c for c in chunks if c['id'] == b'axml'), None)
+    if axml_chunk is None:
         raise ValueError("文件不包含 axml chunk")
 
-    axml_data = bytes(data[axml_data_pos:axml_data_pos + axml_data_size])
+    data_chunk = next((c for c in chunks if c['id'] == b'data'), None)
+    if data_chunk is None:
+        raise ValueError("文件不包含 data chunk")
+
+    print(f"[EAR修复] 扫描完成: {len(chunks)} 个 chunk, axml 大小={axml_chunk['size']}, "
+          f"data 大小声明={data_chunk['size']}, data 实际大小={data_chunk['real_size']}")
+
+    # ---------------- 阶段 2：读取并修复 axml ----------------
+    with open(input_path, 'rb') as src:
+        src.seek(axml_chunk['data_pos'])
+        axml_data = src.read(axml_chunk['size'])
+
     fixed_xml = _fix_adm_xml(axml_data)
+    new_axml_size = len(fixed_xml)
+    new_axml_padded = new_axml_size + (new_axml_size % 2)
+    old_axml_padded = axml_chunk['size'] + (axml_chunk['size'] % 2)
 
-    old_padded = axml_data_size + (axml_data_size % 2)
-    new_padded = len(fixed_xml) + (len(fixed_xml) % 2)
+    # ---------------- 阶段 3：计算 data 实际大小与新文件总大小 ----------------
+    actual_data_size = data_chunk['real_size']
 
-    new_data = bytearray()
-    new_data.extend(data[:axml_data_pos])          # header + axml chunk header
-    new_data.extend(fixed_xml)
-    if len(fixed_xml) % 2:
-        new_data.append(0)
-    new_data.extend(data[axml_data_pos + old_padded:])  # 剩余部分
+    # 新文件从 'WAVE' 之后到文件末尾的大小（RIFF size 字段含义）
+    new_riff_size = 4  # 'WAVE'
+    for c in chunks:
+        if c['id'] == b'axml':
+            new_riff_size += 8 + new_axml_padded
+        elif c['id'] == b'data':
+            new_riff_size += 8 + actual_data_size + (actual_data_size % 2)
+        else:
+            new_riff_size += 8 + c['real_size'] + (c['real_size'] % 2)
 
-    # 更新 axml chunk size
-    struct.pack_into('<I', new_data, axml_data_pos - 4, len(fixed_xml))
-    # 更新文件总大小（从 WAVE 之后算起）
-    struct.pack_into('<I', new_data, 4, len(new_data) - 8)
+    use_rf64 = is_rf64 or (new_riff_size > 0xFFFFFFF0)
 
-    temp_path = str(
-        Path(tempfile.gettempdir()) / f"fixed_{Path(input_path).name}"
-    )
-    with open(temp_path, 'wb') as f:
-        f.write(new_data)
+    print(f"[EAR修复] 原文件 RF64={is_rf64}, 新文件总 riff_size={new_riff_size}, "
+          f"使用 RF64={use_rf64}, 音频数据大小={actual_data_size}")
 
-    return temp_path
+    # ---------------- 阶段 4：流式构建新文件 ----------------
+    COPY_BUF = 1024 * 1024  # 1 MB
+
+    def _copy_stream(src, dst, offset: int, size: int, callback=None, total=None):
+        """从 src 的 offset 处流式复制 size 字节到 dst，可选汇报进度。"""
+        src.seek(offset)
+        remaining = size
+        copied = 0
+        while remaining > 0:
+            to_read = min(COPY_BUF, remaining)
+            buf = src.read(to_read)
+            if not buf:
+                break
+            dst.write(buf)
+            copied += len(buf)
+            remaining -= len(buf)
+            if callback and total and total > 0:
+                callback(min(100, int(copied / total * 100)))
+
+    with open(input_path, 'rb') as src, open(temp_path, 'wb') as dst:
+        # 写入 RIFF/RF64 header
+        if use_rf64:
+            dst.write(b'RF64')
+            dst.write(struct.pack('<I', 0xFFFFFFFF))
+            dst.write(b'WAVE')
+        else:
+            if new_riff_size > 0xFFFFFFFF:
+                raise ValueError("文件大小超过 RIFF 32 位限制但未启用 RF64")
+            dst.write(b'RIFF')
+            dst.write(struct.pack('<I', new_riff_size))
+            dst.write(b'WAVE')
+
+        for c in chunks:
+            cid = c['id']
+
+            if cid == b'axml':
+                # 写入修复后的 axml
+                dst.write(b'axml')
+                dst.write(struct.pack('<I', new_axml_size))
+                dst.write(fixed_xml)
+                if new_axml_size % 2:
+                    dst.write(b'\x00')
+
+            elif cid == b'ds64':
+                # 重写 ds64 以匹配新文件大小
+                dst.write(b'ds64')
+                # 最小 ds64: 3*uint64 + 1*uint32 = 24 + 4 = 28 bytes
+                dst.write(struct.pack('<I', 28))
+                dst.write(struct.pack('<Q', new_riff_size))
+                dst.write(struct.pack('<Q', actual_data_size))
+                dst.write(struct.pack('<Q', ds64_info['sample_count'] if ds64_info else 0))
+                dst.write(struct.pack('<I', 0))  # tableLength
+
+            elif cid == b'data':
+                # 写入 data chunk header
+                dst.write(b'data')
+                if use_rf64:
+                    dst.write(struct.pack('<I', 0xFFFFFFFF))
+                else:
+                    dst.write(struct.pack('<I', actual_data_size))
+
+                # 流式复制音频数据，期间汇报进度
+                if progress_callback:
+                    # 修复阶段从 0% 到 100%
+                    _copy_stream(
+                        src, dst, c['data_pos'], actual_data_size,
+                        callback=progress_callback, total=actual_data_size,
+                    )
+                else:
+                    _copy_stream(src, dst, c['data_pos'], actual_data_size)
+
+                if actual_data_size % 2:
+                    dst.write(b'\x00')
+
+            else:
+                # 原样复制其他 chunk（使用 real_size 跳过可能存在的 64 位占位）
+                dst.write(cid)
+                dst.write(struct.pack('<I', c['size']))
+                _copy_stream(src, dst, c['data_pos'], c['real_size'])
+                if c['real_size'] % 2:
+                    dst.write(b'\x00')
+
+    print(f"[EAR修复] 已生成修复文件: {temp_path} ({temp_path.stat().st_size} bytes)")
+    return str(temp_path)
 
 
 def get_supported_layouts() -> List[str]:
@@ -394,7 +556,8 @@ def render_adm_with_progress(
         print(traceback.format_exc())
         err_msg = str(first_err)
         if "has a reference to both" in err_msg:
-            fixed_path = _create_fixed_bw64(input_path)
+            print("[EAR渲染] 检测到 audioStreamFormat 双重引用，开始流式修复文件...")
+            fixed_path = _create_fixed_bw64(input_path, progress_callback=progress_callback)
             try:
                 _do_render(fixed_path, output_path, total_samples)
                 print(f"[EAR渲染] 修复后文件渲染成功，输出: {output_path}")
