@@ -1,0 +1,137 @@
+name: Build Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-arm64-dmg:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Install dependencies
+        run: |
+          pip install PySide6 numpy scipy soundfile openpyxl
+          pip install git+https://github.com/ebu/ebu_adm_renderer.git
+          pip install pyinstaller
+      
+      - name: Build App
+        run: |
+          pyinstaller \
+            --windowed \
+            --target-arch arm64 \
+            --name "LouDuck" \
+            --icon "assets/icon.icns" \
+            --hidden-import=ear \
+            --hidden-import=scipy.special._cdflib \
+            --add-data "src/renderers:renderers" \
+            --add-data "assets:assets" \
+            --add-data "$(python -c 'import ear; print(ear.__path__[0])'):ear" \
+            src/main_gui.py
+      
+      - name: Sign App
+        run: codesign --force --deep --sign - dist/LouDuck.app
+      
+      - name: Create DMG
+        run: |
+          cd dist
+          mkdir -p dmg_contents
+          cp -r LouDuck.app dmg_contents/
+          ln -s /Applications dmg_contents/Applications
+          
+          hdiutil detach /Volumes/LouDuck -force || true
+          rm -f LouDuck-macOS-AppleSilicon.dmg
+          
+          for i in 1 2 3; do
+            echo "Attempt $i: creating DMG..."
+            if hdiutil create \
+              -volname "LouDuck" \
+              -srcfolder dmg_contents \
+              -ov \
+              -format UDZO \
+              LouDuck-macOS-AppleSilicon.dmg; then
+              break
+            fi
+            echo "DMG creation failed, retrying in 5s..."
+            sleep 5
+            hdiutil detach /Volumes/LouDuck -force || true
+          done
+          
+          if [ ! -f LouDuck-macOS-AppleSilicon.dmg ]; then
+            echo "Error: DMG was not created after 3 attempts"
+            exit 1
+          fi
+          
+          rm -rf dmg_contents
+      
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LouDuck-macOS-AppleSilicon-DMG
+          path: dist/LouDuck-macOS-AppleSilicon.dmg
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: dist/LouDuck-macOS-AppleSilicon.dmg
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Install dependencies
+        run: |
+          pip install PySide6 numpy scipy soundfile openpyxl
+          pip install git+https://github.com/ebu/ebu_adm_renderer.git
+          pip install pyinstaller
+      
+      - name: Build Windows App (onedir)
+        run: |
+          pyinstaller `
+            --onedir `
+            --windowed `
+            --name "LouDuck" `
+            --icon "assets/icon.ico" `
+            --hidden-import=ear `
+            --hidden-import=scipy.special._cdflib `
+            --add-data "src/renderers;renderers" `
+            --add-data "assets;assets" `
+            --add-data "$(python -c 'import ear; print(ear.__path__[0])');ear" `
+            src/main_gui.py
+      
+      - name: Zip Output
+        run: |
+          cd dist
+          Compress-Archive -Path LouDuck -DestinationPath LouDuck-Windows-x64.zip -Force
+      
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LouDuck-Windows-x64
+          path: dist/LouDuck-Windows-x64.zip
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: dist/LouDuck-Windows-x64.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
