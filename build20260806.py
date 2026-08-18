@@ -119,7 +119,7 @@ def discover_ear_data() -> list[str]:
         for cand in candidates:
             if cand.exists() and cand.is_dir():
                 rel = "ear/" + "/".join(cand.relative_to(ear_pkg_dir).parts)
-                datas.append(f"('{str(cand).replace(chr(92), '/')}', '{rel}')")
+                datas.append(f"('{str(cand).replace(chr(92), '/')}', '{rel}'),")
         if datas:
             log_ok(f"发现 EAR 数据目录: {len(datas)} 个")
     except Exception as e:

@@ -2874,7 +2874,15 @@ def main():
     import faulthandler
     # 启用 faulthandler，在 SIGBUS/SIGSEGV 等 C 层面崩溃时输出 traceback，
     # 便于定位 Mac 上打包版闪退的根因。
-    faulthandler.enable()
+    # Windows 无控制台打包版 sys.stderr 为 None，此时写入 crash.log 或跳过。
+    if sys.stderr is not None:
+        faulthandler.enable()
+    else:
+        try:
+            crash_log = Path(sys.executable).parent / "crash.log"
+            faulthandler.enable(file=open(str(crash_log), "a", encoding="utf-8"))
+        except Exception:
+            pass
     
     parser = argparse.ArgumentParser()
     parser.add_argument('--lang', default=None, help='Force language, e.g. en, zh')
