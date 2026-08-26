@@ -295,6 +295,8 @@ class DetailedMeasurementWorker(QThread):
             self.sub_step.emit(self.tr("初始化: {num_channels} ch, {actual_duration:.1f} s").format(num_channels=num_channels, actual_duration=actual_duration), 15)
             
             if self.input_mode == 'adm':
+                if getattr(self.input_data, 'adm', None) is None:
+                    raise ValueError(self.tr("ADM 元数据为空，无法按 ADM 模式测量"))
                 adm_config = self.input_data.adm.to_itu1770_config(num_channels)
                 meter = ITU1770Meter(adm_config, sr)
             else:
@@ -1577,7 +1579,7 @@ class LoudnessMeterApp(QMainWindow):
         right_info.setSpacing(0)
         right_info.setAlignment(Qt.AlignRight | Qt.AlignBottom)
         
-        version_label = QLabel('v1.0.5  (build 260804)')
+        version_label = QLabel('v1.0.6  (build 260826)')
         version_label.setStyleSheet('color: #667eea; font-size: 8px; border: none;')
         version_label.setAlignment(Qt.AlignRight)
         right_info.addWidget(version_label)
@@ -2147,8 +2149,13 @@ class LoudnessMeterApp(QMainWindow):
             input_mode = 'file'
             input_data = self.rendered_file
         elif hasattr(self, 'current_adm_parser') and self.current_adm_parser and self.current_file:
-            input_mode = 'adm'
-            input_data = self.current_adm_parser
+            if getattr(self.current_adm_parser, 'adm', None) is None:
+                # 解析器未得到 ADM 元数据，按普通多声道文件测量
+                input_mode = 'file'
+                input_data = self.current_file
+            else:
+                input_mode = 'adm'
+                input_data = self.current_adm_parser
         elif self.current_file:
             input_mode = 'file'
             input_data = self.current_file
@@ -2799,7 +2806,7 @@ def _show_splash(app):
     painter.setPen(QColor("#667eea"))
     painter.setFont(QFont("Segoe UI", 10))
     fm = QFontMetrics(painter.font())
-    text = "v1.0.5  (build 260804)"
+    text = "v1.0.6  (build 260826)"
     x = card_x + (card_w - fm.horizontalAdvance(text)) // 2
     painter.drawText(x, card_y + 175, text)
 

@@ -1027,9 +1027,10 @@ class BW64Parser:
         return data, sr
 
 
-def _scan_for_axml(f, file_size: int, actual_size: int) -> Tuple[bool, Optional[str]]:
+def _scan_for_axml(f, file_size: int, actual_size: int, ds64_info: Optional[Dict[str, int]] = None) -> Tuple[bool, Optional[str]]:
     """在 WAVE/BW64 chunk 中扫描 axml chunk。
     
+    支持 axml 位于 data chunk 之后的情况（常见于 BW64/RF64 ADM 文件）。
     返回 (是否找到 axml, 失败原因或 None)
     """
     scan_end = min(8 + file_size, actual_size)
@@ -1047,12 +1048,19 @@ def _scan_for_axml(f, file_size: int, actual_size: int) -> Tuple[bool, Optional[
                 if len(chunk_size_bytes) < 4:
                     return False, "块大小读取失败"
                 chunk_size = struct.unpack('<I', chunk_size_bytes)[0]
-                # 大文件的 data chunk 可能使用 0xFFFFFFFF；ds64 中已有真实大小，
-                # 但 axml 通常在 data 之前，因此这里直接退出扫描。
+                # 大文件的 data chunk 可能使用 0xFFFFFFFF；使用 ds64 dataSize 跳过数据块后继续扫描
                 if chunk_id == b'data' and chunk_size == 0xFFFFFFFF:
-                    return False, "遇到 64 位 data chunk，axml 通常在此之前"
+                    data_size = ds64_info.get('data_size', 0) if ds64_info else 0
+                    if data_size > 0:
+                        skip_size = min(data_size, scan_end - f.tell())
+                        skip_size = min(skip_size, actual_size - f.tell())
+                        f.seek(skip_size, 1)
+                        if skip_size % 2:
+                            f.read(1)
+                        continue
+                    return False, "遇到 64 位 data chunk 但缺少 ds64 dataSize"
                 # 防止被截断文件中的超大 chunk_size 导致越界扫描
-                remaining = actual_size - f.tell()
+                remaining = scan_end - f.tell()
                 if chunk_size > remaining:
                     truncated_missing = (8 + file_size) - actual_size if file_size > 0 else 0
                     msg = f"文件可能被截断：chunk {chunk_id!r} 声明大小 {chunk_size} 超过剩余字节 {remaining}"
@@ -1084,17 +1092,38 @@ def is_adm_file(file_path: str) -> bool:
             declared_size = struct.unpack('<I', header[4:8])[0]
             print(f"[is_adm_file] 文件头: {riff_id}, format: {header[8:12]}, 32位size: {declared_size}, 实际大小: {actual_size}", flush=True)
             if riff_id in (b'BW64', b'RF64'):
-                return True
+                # BW64/RF64 都可能是 ADM 容器，但也可能只是大文件 WAV。
+                # 必须实际检出 axml chunk 才认定为 ADM。
+                print(f"[is_adm_file] {riff_id.decode('ascii')} 文件头，需扫描 axml chunk", flush=True)
+                file_size = declared_size
+                ds64_info = None
+                if file_size == 0xFFFFFFFF:
+                    f.seek(12)
+                    ds64_info = _read_ds64_info_static(f)
+                    if ds64_info is not None:
+                        file_size = ds64_info['riff_size']
+                    else:
+                        print(f"[is_adm_file] 警告: {riff_id.decode('ascii')} 大文件但未找到 ds64 chunk，按非 ADM 处理", flush=True)
+                        print(f"[is_adm_file] 最终返回 False", flush=True)
+                        return False
+                f.seek(12)
+                result, reason = _scan_for_axml(f, file_size, actual_size, ds64_info)
+                if result:
+                    print(f"[is_adm_file] {riff_id.decode('ascii')} 文件包含 axml，返回 True", flush=True)
+                else:
+                    print(f"[is_adm_file] {riff_id.decode('ascii')} 文件未找到 axml，返回 False，原因: {reason}", flush=True)
+                return result
             
             if riff_id == b'RIFF' and header[8:12] == b'WAVE':
                 file_size = declared_size
+                ds64_info = None
                 
                 # 大文件：32 位 size 为 0xFFFFFFFF，需要从 ds64 读取 64 位大小
                 if file_size == 0xFFFFFFFF:
                     f.seek(12)
-                    ds64_size = _read_ds64_size_static(f)
-                    if ds64_size is not None:
-                        file_size = ds64_size
+                    ds64_info = _read_ds64_info_static(f)
+                    if ds64_info is not None:
+                        file_size = ds64_info['riff_size']
                     else:
                         print(f"[is_adm_file] 警告: 大文件但未找到 ds64 chunk，按 4GB 处理", flush=True)
                 
@@ -1105,7 +1134,7 @@ def is_adm_file(file_path: str) -> bool:
                     print(f"[is_adm_file] 警告: 声明文件大小 ({8 + file_size}) 大于实际文件大小 ({actual_size})，可能缺少 {missing} bytes 数据", flush=True)
                 
                 f.seek(12)
-                result, reason = _scan_for_axml(f, file_size, actual_size)
+                result, reason = _scan_for_axml(f, file_size, actual_size, ds64_info)
                 if result:
                     print(f"[is_adm_file] _scan_for_axml 返回: True", flush=True)
                 else:
@@ -1123,8 +1152,12 @@ def is_adm_file(file_path: str) -> bool:
     return False
 
 
-def _read_ds64_size_static(f) -> Optional[int]:
-    """静态版本：读取 ds64 chunk 中的 riffSize。"""
+def _read_ds64_info_static(f) -> Optional[Dict[str, int]]:
+    """静态版本：读取 ds64 chunk 中的 64 位大小信息。
+    
+    返回 {'riff_size': int, 'data_size': int, 'sample_count': int}，
+    如果没有 ds64 则返回 None。
+    """
     start_pos = f.tell()
     try:
         while True:
@@ -1138,7 +1171,13 @@ def _read_ds64_size_static(f) -> Optional[int]:
             
             if chunk_id == b'ds64':
                 riff_size = struct.unpack('<Q', f.read(8))[0]
-                return riff_size
+                data_size = struct.unpack('<Q', f.read(8))[0]
+                sample_count = struct.unpack('<Q', f.read(8))[0]
+                return {
+                    'riff_size': riff_size,
+                    'data_size': data_size,
+                    'sample_count': sample_count
+                }
             
             f.seek(chunk_size + (chunk_size % 2), 1)
     except Exception:
@@ -1146,3 +1185,9 @@ def _read_ds64_size_static(f) -> Optional[int]:
     finally:
         f.seek(start_pos)
     return None
+
+
+def _read_ds64_size_static(f) -> Optional[int]:
+    """静态版本：读取 ds64 chunk 中的 riffSize。"""
+    ds64_info = _read_ds64_info_static(f)
+    return ds64_info['riff_size'] if ds64_info else None

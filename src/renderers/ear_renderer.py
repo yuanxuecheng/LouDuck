@@ -424,6 +424,7 @@ def render_adm(
     # 策略 B：先尝试原始文件；若因 audioStreamFormat 双重引用失败，自动修复并重试
     try:
         driver.run(input_path, output_path)
+        _ensure_soundfile_compatible(output_path)
         return output_path
     except Exception as first_err:
         err_msg = str(first_err)
@@ -431,6 +432,7 @@ def render_adm(
             fixed_path = _create_fixed_bw64(input_path)
             try:
                 driver.run(fixed_path, output_path)
+                _ensure_soundfile_compatible(output_path)
                 return output_path
             finally:
                 try:
@@ -440,6 +442,29 @@ def render_adm(
                     pass
         else:
             raise
+
+
+def _ensure_soundfile_compatible(path: str) -> None:
+    """
+    EAR 的 Bw64Writer 在大文件（>=4GB）时会把文件头写成 BW64 格式。
+    libsndfile/soundfile 原生不支持 BW64，但支持结构几乎相同的 RF64。
+    此函数在渲染完成后把纯 PCM 输出文件的 BW64 头就地改写为 RF64，使其
+    能被后续 soundfile 读取与测量。
+
+    仅修改文件头前 4 个字节，不触碰任何 chunk 内容；对普通 RIFF/WAV
+    文件没有任何影响。
+    """
+    try:
+        with open(path, 'r+b') as f:
+            header = f.read(4)
+            if header == b'BW64':
+                f.seek(0)
+                f.write(b'RF64')
+                print(f"[EAR渲染] 大文件输出头从 BW64 改写为 RF64: {path}")
+            elif header == b'RIFF':
+                print(f"[EAR渲染] 输出为普通 RIFF/WAV，无需改写: {path}")
+    except Exception as e:
+        print(f"[EAR渲染] 警告: 检查/改写输出文件头失败: {e}")
 
 
 def render_adm_with_progress(
@@ -548,6 +573,7 @@ def render_adm_with_progress(
     print(f"[EAR渲染] 开始策略B渲染...")
     try:
         _do_render(input_path, output_path, total_samples)
+        _ensure_soundfile_compatible(output_path)
         print(f"[EAR渲染] 原始文件渲染成功，输出: {output_path}")
         return output_path
     except Exception as first_err:
@@ -560,6 +586,7 @@ def render_adm_with_progress(
             fixed_path = _create_fixed_bw64(input_path, progress_callback=progress_callback)
             try:
                 _do_render(fixed_path, output_path, total_samples)
+                _ensure_soundfile_compatible(output_path)
                 print(f"[EAR渲染] 修复后文件渲染成功，输出: {output_path}")
                 return output_path
             finally:
